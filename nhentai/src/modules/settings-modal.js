@@ -46,6 +46,7 @@
             quickBlacklist: pick('enableDetailQuickBlacklist'),
             blacklistFilterTools: pick('enableUserSettingsBlacklistFilter'),
             devPanel: pick('showDevPanel'),
+            metaCache: pick('enableMetaPersistentCache'),
             apiKeyConfigured: Boolean(String(Config.get('apiKey') || '').trim()),
             apiKeyTestStatus: Config.get('apiKeyTestStatus')
         };
@@ -303,6 +304,13 @@
                         </div>
                         <label class="nh-switch"><input type="checkbox" id="cfg-dev-panel" ${config.devPanel ? 'checked' : ''}><span class="nh-slider"></span></label>
                     </div>
+                    <div class="nh-setting-item">
+                        <div class="nh-setting-content">
+                            <span class="nh-setting-label">${t('lbl_meta_cache')}</span>
+                            <div class="nh-info-text">${t('desc_meta_cache')}</div>
+                        </div>
+                        <label class="nh-switch"><input type="checkbox" id="cfg-meta-cache" ${config.metaCache ? 'checked' : ''}><span class="nh-slider"></span></label>
+                    </div>
                     <div class="nh-force-update-wrap">
                         <button class="nh-btn nh-btn-secondary nh-btn-block" id="nh-force-update"><i class="fa fa-refresh"></i> ${t('btn_update')}</button>
                     </div>
@@ -415,6 +423,7 @@
                 enableDetailQuickBlacklist: document.getElementById('cfg-detail-quick-blacklist').checked,
                 enableUserSettingsBlacklistFilter: document.getElementById('cfg-blacklist-filter-tools').checked,
                 showDevPanel: document.getElementById('cfg-dev-panel').checked,
+                enableMetaPersistentCache: document.getElementById('cfg-meta-cache').checked,
                 quickTagsSettings: newQt,
                 langFilter: newFilters
             };
@@ -515,12 +524,16 @@
         document.getElementById('nh-settings-cancel').onclick = () => closeModal();
         overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
 
-        document.getElementById('nh-settings-save').onclick = () => {
+        document.getElementById('nh-settings-save').onclick = async () => {
             const patch = readSettingsForm();
             closeModal();
             // 没有改动时不刷新页面，保留无限滚动已加载的内容和滚动位置。
             if (!hasSettingsChanges(patch)) return;
+            const disablingMetaCache = Config.get('enableMetaPersistentCache') !== false
+                && patch.enableMetaPersistentCache === false;
             Config.setMany(patch);
+            // 关闭持久缓存时先清空已缓存的数据再刷新。
+            if (disablingMetaCache) await GalleryMetaStore.clear();
             location.reload();
         };
     }

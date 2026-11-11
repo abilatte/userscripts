@@ -46,6 +46,14 @@
             else if (mode === 'replace') element.innerHTML = `${escapeHtml(cnName)} <span class="nh-original-tag">${escapeHtml(rawName)}</span>`;
             else element.innerHTML = `${escapeHtml(rawName)} <span class="nh-translated-tag">${escapeHtml(cnName)}</span>`;
         }
+        // 记录渲染结果，用于判断节点之后是否被站点改写。
+        element.dataset.nhRendered = element.textContent;
+    }
+
+    // 链接未变且文本仍是本脚本写入的内容：翻译依然有效，无需还原重译。
+    function isTagTranslationCurrent(element) {
+        return element.dataset.nhRawHref === getTagElementHref(element)
+            && element.dataset.nhRendered === element.textContent;
     }
 
     function getIndexPageNamespace(pathname = window.location.pathname) {
@@ -128,6 +136,8 @@
         queryAll(context, TAG_NAME_SELECTOR).forEach(element => {
             // 未改写过的节点由站点维护文本，原样保留（slug 无法还原连字符等字符）。
             if (!element.dataset.nhTranslated) return;
+            // 每次 DOM 变化都会走到这里；仍然有效的翻译不再“还原再重译”。
+            if (isTagTranslationCurrent(element)) return;
             if (element.title) {
                 // href 未变时 title 即原文；节点被复用到其它标签时才退回按 href 推导。
                 const href = getTagElementHref(element);
@@ -139,6 +149,7 @@
             }
             element.removeAttribute('data-nh-translated');
             element.removeAttribute('data-nh-raw-href');
+            element.removeAttribute('data-nh-rendered');
             element.removeAttribute('title');
         });
     }
@@ -151,6 +162,7 @@
             }
             element.removeAttribute('data-nh-translated');
             element.removeAttribute('data-nh-raw-href');
+            element.removeAttribute('data-nh-rendered');
             element.removeAttribute('title');
         });
     }

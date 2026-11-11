@@ -145,6 +145,7 @@
         enableDetailQuickBlacklist: true,
         enableUserSettingsBlacklistFilter: true,
         showDevPanel: false,
+        enableMetaPersistentCache: true,
         disableAutoDbUpdate: true,
         apiKey: '',
         apiKeyTestStatus: '',
@@ -207,6 +208,9 @@
             if (this.settings.langFilter.includes('0')) {
                 this.settings.langFilter = [];
             }
+            if (typeof this.settings.enableMetaPersistentCache !== 'boolean') {
+                this.settings.enableMetaPersistentCache = DEFAULT_CONFIG.enableMetaPersistentCache;
+            }
             if (typeof this.settings.apiKey !== 'string') {
                 this.settings.apiKey = '';
             }
@@ -253,8 +257,23 @@
                 this.save();
             }
         },
+        saveTimer: null,
         save() {
+            if (this.saveTimer) {
+                clearTimeout(this.saveTimer);
+                this.saveTimer = null;
+            }
             GM_setValue('user_settings', JSON.stringify(this.settings));
+        },
+        // 高频调整（如 Ctrl+滚轮缩放）先改内存值，停止操作后再落盘一次。
+        setDeferred(key, val, delay = 400) {
+            this.settings[key] = val;
+            clearTimeout(this.saveTimer);
+            this.saveTimer = setTimeout(() => this.save(), delay);
+        },
+        // 有待落盘的延迟写入时立即写入（离开页面、退出阅读时调用）。
+        flush() {
+            if (this.saveTimer) this.save();
         },
         get(key) {
             return this.settings[key];
@@ -269,6 +288,7 @@
         }
     };
     Config.load();
+    window.addEventListener('pagehide', () => Config.flush());
 
     const Dict = {
         Nav: {
@@ -2604,6 +2624,8 @@
         indexReady: false,
         worker: null,
         workerUrl: null,
+        // 搜索索引只在用户第一次聚焦搜索框后才构建；之前只需要 data / cnToItem。
+        workerWanted: false,
         pendingSearches: new Map(),
         searchId: 0,
         searchTimeoutMs: 3000,
@@ -2656,7 +2678,7 @@
             this.data = idbData;
             this.rebuildCnIndex();
             runContentTranslation();
-            this.initWorker();
+            this.syncWorker();
             if (shouldAutoIntervalUpdate || needsVersionUpdate || needsIntegrityUpdate) {
                 // 本地已有词库时先启用再后台更新，远端慢或不可达都不阻塞汉化与搜索联想。
                 this.update().catch(error => console.error('[nHentai Pro] 词库后台更新失败:', error));
@@ -2695,10 +2717,8 @@
                         this.data = currentData;
                         this.rebuildCnIndex();
                     }
-                    // init 已先用本地词库启动 Worker；正在建索引时不要重启。
-                    if (!this.worker) {
-                        this.initWorker();
-                    }
+                    // 已有 Worker（可能正在建索引）时不要重启。
+                    this.syncWorker();
                     if (status) {
                         status.textContent = getUIText('db_status_latest');
                         setTimeout(() => status.remove(), 2000);
@@ -2734,7 +2754,7 @@
                 }
                 runContentTranslation();
                 this.terminateWorker();
-                this.initWorker();
+                this.syncWorker();
                 if (force) location.reload();
             } catch (e) {
                 console.error(e);
@@ -2744,7 +2764,8 @@
                     this.data = currentData;
                     this.rebuildCnIndex();
                     runContentTranslation();
-                    this.initWorker();
+                    this.terminateWorker();
+                    this.syncWorker();
                 }
                 if (status) {
                     status.textContent = getUIText(canUseLocal ? 'db_status_failed_local' : 'db_status_failed');
@@ -3005,6 +3026,16 @@
             this.pendingSearches.forEach(resolve => resolve([]));
             this.pendingSearches.clear();
         },
+        // 搜索框首次聚焦时调用：标记需要索引，并在词库就绪时启动 Worker。
+        ensureWorker() {
+            this.workerWanted = true;
+            this.syncWorker();
+        },
+        // 需要索引、词库已加载且尚无 Worker 时才启动；其余情况不做事。
+        syncWorker() {
+            if (!this.workerWanted || this.worker || !this.data?.tag) return;
+            this.initWorker();
+        },
         // Worker 只负责搜索索引匹配，避免大词库检索阻塞主线程。
         initWorker() {
             if (this.worker) this.terminateWorker();
@@ -3036,19 +3067,13 @@
                         for (const en in map) {
                             if (ns === 'tag' && ['chinese', 'english', 'japanese'].includes(en)) continue;
                             const cn = map[en];
-                            const safeEn = escapeHtml(en);
-                            const safeCn = escapeHtml(cn);
-                            const safeBadge = escapeHtml(nsBadge);
-                            const contentHtml = cn ? safeEn + ' <span class="meta">' + safeCn + '</span>' : safeEn;
-                            const fullHtml = '<span class="type-badge">' + safeBadge + '</span><span class="content-wrapper">' + contentHtml + '</span>';
-
-                            const item = { term: en, display: fullHtml, value: en, namespace: ns, cn: cn, isCnInput: false };
+                            // 展示用 HTML 不在建索引时生成（8 万多条），只在返回结果时为命中项生成。
+                            const item = { term: en, value: en, namespace: ns, badge: nsBadge, cn: cn, isCnInput: false };
                             index.all.push(item);
                             index[ns].push(item);
 
                             if (cn) {
-                                const cnFullHtml = '<span class="type-badge">' + safeBadge + '</span><span class="content-wrapper">' + safeCn + ' <span class="meta">' + safeEn + '</span></span>';
-                                const cnItem = { term: cn.toLowerCase(), display: cnFullHtml, value: en, namespace: ns, cn: cn, isCnInput: true };
+                                const cnItem = { term: cn.toLowerCase(), value: en, namespace: ns, badge: nsBadge, cn: cn, isCnInput: true };
                                 index.all.push(cnItem);
                                 index[ns].push(cnItem);
                             }
@@ -3070,6 +3095,18 @@
                 return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
                     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
                 });
+            }
+
+            function buildDisplay(item) {
+                const safeEn = escapeHtml(item.value);
+                const safeCn = escapeHtml(item.cn);
+                let contentHtml = safeEn;
+                if (item.cn) {
+                    contentHtml = item.isCnInput
+                        ? safeCn + ' <span class="meta">' + safeEn + '</span>'
+                        : safeEn + ' <span class="meta">' + safeCn + '</span>';
+                }
+                return '<span class="type-badge">' + escapeHtml(item.badge) + '</span><span class="content-wrapper">' + contentHtml + '</span>';
             }
 
             function compareIndexItems(a, b) {
@@ -3189,7 +3226,7 @@
                         const pluralNs = NS_PLURAL_MAP[m.item.namespace] || m.item.namespace;
                         const finalVal = \`\${pluralNs}:"\${m.item.value}"\`;
                         uniqueMap.set(uniqueKey, {
-                            display: m.item.display,
+                            item: m.item,
                             finalValue: finalVal,
                             originalMatch: m.originalMatch,
                             namespace: m.item.namespace,
@@ -3199,7 +3236,10 @@
                         });
                     }
                 });
-                return Array.from(uniqueMap.values()).slice(0, 50);
+                return Array.from(uniqueMap.values()).slice(0, 50).map(result => {
+                    const { item, ...rest } = result;
+                    return { display: buildDisplay(item), ...rest };
+                });
             }
         `;
             const blob = new Blob([workerScript], {
@@ -3309,6 +3349,8 @@
             "grp_blacklist": "黑名单工具",
             "lbl_dev_panel": "开发者诊断面板",
             "desc_dev_panel": "显示请求、预取与无限滚动实时指标",
+            "lbl_meta_cache": "本地缓存画廊信息",
+            "desc_meta_cache": "把页数、标签等画廊信息缓存在浏览器本地 7 天，减少重复请求和限流；关闭时会清空已缓存的数据",
             "lbl_qt": "搜索栏快捷标签",
             "lbl_qt_sel": "选择要显示的快捷按钮:",
             "lbl_quick_blacklist": "详情页快捷屏蔽",
@@ -3461,6 +3503,8 @@
             "grp_blacklist": "Blacklist Tools",
             "lbl_dev_panel": "Developer Diagnostics",
             "desc_dev_panel": "Show request, prefetch, and infinite scroll metrics",
+            "lbl_meta_cache": "Cache gallery info locally",
+            "desc_meta_cache": "Keep page counts, tags and other gallery info in this browser for 7 days to cut repeat requests and rate limits. Turning it off clears the cached data",
             "lbl_qt": "Search Bar Quick Tags",
             "lbl_qt_sel": "Visible Quick Tags:",
             "lbl_quick_blacklist": "Gallery Quick Blacklist",
@@ -3769,6 +3813,7 @@
             quickBlacklist: pick('enableDetailQuickBlacklist'),
             blacklistFilterTools: pick('enableUserSettingsBlacklistFilter'),
             devPanel: pick('showDevPanel'),
+            metaCache: pick('enableMetaPersistentCache'),
             apiKeyConfigured: Boolean(String(Config.get('apiKey') || '').trim()),
             apiKeyTestStatus: Config.get('apiKeyTestStatus')
         };
@@ -4026,6 +4071,13 @@
                         </div>
                         <label class="nh-switch"><input type="checkbox" id="cfg-dev-panel" ${config.devPanel ? 'checked' : ''}><span class="nh-slider"></span></label>
                     </div>
+                    <div class="nh-setting-item">
+                        <div class="nh-setting-content">
+                            <span class="nh-setting-label">${t('lbl_meta_cache')}</span>
+                            <div class="nh-info-text">${t('desc_meta_cache')}</div>
+                        </div>
+                        <label class="nh-switch"><input type="checkbox" id="cfg-meta-cache" ${config.metaCache ? 'checked' : ''}><span class="nh-slider"></span></label>
+                    </div>
                     <div class="nh-force-update-wrap">
                         <button class="nh-btn nh-btn-secondary nh-btn-block" id="nh-force-update"><i class="fa fa-refresh"></i> ${t('btn_update')}</button>
                     </div>
@@ -4138,6 +4190,7 @@
                 enableDetailQuickBlacklist: document.getElementById('cfg-detail-quick-blacklist').checked,
                 enableUserSettingsBlacklistFilter: document.getElementById('cfg-blacklist-filter-tools').checked,
                 showDevPanel: document.getElementById('cfg-dev-panel').checked,
+                enableMetaPersistentCache: document.getElementById('cfg-meta-cache').checked,
                 quickTagsSettings: newQt,
                 langFilter: newFilters
             };
@@ -4238,12 +4291,16 @@
         document.getElementById('nh-settings-cancel').onclick = () => closeModal();
         overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
 
-        document.getElementById('nh-settings-save').onclick = () => {
+        document.getElementById('nh-settings-save').onclick = async () => {
             const patch = readSettingsForm();
             closeModal();
             // 没有改动时不刷新页面，保留无限滚动已加载的内容和滚动位置。
             if (!hasSettingsChanges(patch)) return;
+            const disablingMetaCache = Config.get('enableMetaPersistentCache') !== false
+                && patch.enableMetaPersistentCache === false;
             Config.setMany(patch);
+            // 关闭持久缓存时先清空已缓存的数据再刷新。
+            if (disablingMetaCache) await GalleryMetaStore.clear();
             location.reload();
         };
     }
@@ -4958,7 +5015,8 @@
         if (input.dataset.nhSearchEnhanced === '1') return;
         input.dataset.nhSearchEnhanced = '1';
         form.addEventListener('submit', (e) => {
-            if (!DB.indexReady) return;
+            // 中文转英文语法只依赖 cnToItem，不需要等搜索索引（Worker）就绪。
+            if (!DB.data?.tag) return;
             const raw = input.value;
             const tokens = [];
             let match;
@@ -5061,6 +5119,8 @@
                 if (qtContainer) qtContainer.style.display = 'flex';
                 return;
             }
+            // 搜索索引懒加载：第一次聚焦搜索框时才启动 Worker 建索引。
+            DB.ensureWorker();
             if (!DB.indexReady) {
                 if (shouldShowSuggestionLoading(form) && (!loadingBox || !loadingBox.isConnected)) {
                     loadingBox = document.createElement('div');
@@ -5820,6 +5880,14 @@
             else if (mode === 'replace') element.innerHTML = `${escapeHtml(cnName)} <span class="nh-original-tag">${escapeHtml(rawName)}</span>`;
             else element.innerHTML = `${escapeHtml(rawName)} <span class="nh-translated-tag">${escapeHtml(cnName)}</span>`;
         }
+        // 记录渲染结果，用于判断节点之后是否被站点改写。
+        element.dataset.nhRendered = element.textContent;
+    }
+
+    // 链接未变且文本仍是本脚本写入的内容：翻译依然有效，无需还原重译。
+    function isTagTranslationCurrent(element) {
+        return element.dataset.nhRawHref === getTagElementHref(element)
+            && element.dataset.nhRendered === element.textContent;
     }
 
     function getIndexPageNamespace(pathname = window.location.pathname) {
@@ -5902,6 +5970,8 @@
         queryAll(context, TAG_NAME_SELECTOR).forEach(element => {
             // 未改写过的节点由站点维护文本，原样保留（slug 无法还原连字符等字符）。
             if (!element.dataset.nhTranslated) return;
+            // 每次 DOM 变化都会走到这里；仍然有效的翻译不再“还原再重译”。
+            if (isTagTranslationCurrent(element)) return;
             if (element.title) {
                 // href 未变时 title 即原文；节点被复用到其它标签时才退回按 href 推导。
                 const href = getTagElementHref(element);
@@ -5913,6 +5983,7 @@
             }
             element.removeAttribute('data-nh-translated');
             element.removeAttribute('data-nh-raw-href');
+            element.removeAttribute('data-nh-rendered');
             element.removeAttribute('title');
         });
     }
@@ -5925,6 +5996,7 @@
             }
             element.removeAttribute('data-nh-translated');
             element.removeAttribute('data-nh-raw-href');
+            element.removeAttribute('data-nh-rendered');
             element.removeAttribute('title');
         });
     }
@@ -7293,6 +7365,7 @@
     const RuntimeMetrics = {
         cacheHit: 0,
         cacheMiss: 0,
+        storeHit: 0,
         fetchOk: 0,
         fetch429: 0,
         fetchAbort: 0,
@@ -7334,6 +7407,159 @@
             && meta.pages.every(page => page?.path)
         );
     }
+
+    // 完整画廊元数据的持久层：新标签页、整页刷新后复用，减少详情 API 请求与 429。
+    // 使用独立数据库：给词库库（nh_helper_db）升版本会被其它标签页的旧连接阻塞。
+    const GalleryMetaStore = {
+        dbName: 'nh_helper_meta',
+        storeName: 'gallery_meta',
+        ttlMs: 7 * 24 * 60 * 60 * 1000,
+        maxEntries: 1500,
+        pruneDelayMs: 8000,
+        dbPromise: null,
+        unavailable: false,
+        pruneScheduled: false,
+
+        isEnabled() {
+            return !this.unavailable && Config.get('enableMetaPersistentCache') !== false;
+        },
+
+        // 持久缓存是可选加速层：打不开（隐私模式、配额、被禁用）时记录一次并停用，请求照常走网络。
+        markUnavailable(error) {
+            if (this.unavailable) return;
+            this.unavailable = true;
+            console.warn('[nHentai Pro] 画廊元数据持久缓存不可用，本次会话改为仅用内存缓存:', error);
+        },
+
+        open() {
+            if (this.dbPromise) return this.dbPromise;
+            this.dbPromise = new Promise(resolve => {
+                let request;
+                try {
+                    request = indexedDB.open(this.dbName, 1);
+                } catch (error) {
+                    this.markUnavailable(error);
+                    resolve(null);
+                    return;
+                }
+                request.onupgradeneeded = () => {
+                    const db = request.result;
+                    if (!db.objectStoreNames.contains(this.storeName)) {
+                        const store = db.createObjectStore(this.storeName, { keyPath: 'id' });
+                        store.createIndex('savedAt', 'savedAt');
+                    }
+                };
+                request.onsuccess = () => {
+                    const db = request.result;
+                    // 其它标签页删除/升级数据库时主动让出连接，避免阻塞对方。
+                    db.onversionchange = () => {
+                        db.close();
+                        this.dbPromise = null;
+                    };
+                    resolve(db);
+                };
+                request.onerror = () => {
+                    this.markUnavailable(request.error);
+                    resolve(null);
+                };
+                request.onblocked = () => {
+                    this.markUnavailable(new Error('indexedDB open blocked'));
+                    resolve(null);
+                };
+            });
+            return this.dbPromise;
+        },
+
+        async get(id) {
+            if (!this.isEnabled()) return null;
+            const db = await this.open();
+            if (!db) return null;
+            return new Promise(resolve => {
+                try {
+                    const request = db.transaction(this.storeName, 'readonly').objectStore(this.storeName).get(String(id));
+                    request.onsuccess = () => {
+                        const record = request.result;
+                        const fresh = record && (Date.now() - Number(record.savedAt || 0)) < this.ttlMs;
+                        resolve(fresh && isCompleteMeta(record.meta) ? record.meta : null);
+                    };
+                    request.onerror = () => resolve(null);
+                } catch (error) {
+                    this.markUnavailable(error);
+                    resolve(null);
+                }
+            });
+        },
+
+        async put(id, meta) {
+            if (!this.isEnabled() || !isCompleteMeta(meta)) return;
+            const db = await this.open();
+            if (!db) return;
+            try {
+                db.transaction(this.storeName, 'readwrite').objectStore(this.storeName).put({
+                    id: String(id),
+                    savedAt: Date.now(),
+                    meta
+                });
+                this.schedulePrune();
+            } catch (error) {
+                this.markUnavailable(error);
+            }
+        },
+
+        // 每次会话清理一次：先删过期，再按写入时间删到上限以内。
+        schedulePrune() {
+            if (this.pruneScheduled) return;
+            this.pruneScheduled = true;
+            setTimeout(() => void this.prune(), this.pruneDelayMs);
+        },
+
+        async prune() {
+            if (!this.isEnabled()) return;
+            const db = await this.open();
+            if (!db) return;
+            try {
+                const store = db.transaction(this.storeName, 'readwrite').objectStore(this.storeName);
+                const index = store.index('savedAt');
+                index.openCursor(IDBKeyRange.upperBound(Date.now() - this.ttlMs)).onsuccess = (event) => {
+                    const cursor = event.target.result;
+                    if (!cursor) return;
+                    cursor.delete();
+                    cursor.continue();
+                };
+                const countRequest = store.count();
+                countRequest.onsuccess = () => {
+                    let overflow = countRequest.result - this.maxEntries;
+                    if (overflow <= 0) return;
+                    index.openCursor().onsuccess = (event) => {
+                        const cursor = event.target.result;
+                        if (!cursor || overflow <= 0) return;
+                        cursor.delete();
+                        overflow -= 1;
+                        cursor.continue();
+                    };
+                };
+            } catch (error) {
+                this.markUnavailable(error);
+            }
+        },
+
+        // 关闭持久缓存时删除整个数据库，不留下浏览记录相关的数据。
+        async clear() {
+            const db = this.dbPromise ? await this.dbPromise : null;
+            db?.close();
+            this.dbPromise = null;
+            return new Promise(resolve => {
+                try {
+                    const request = indexedDB.deleteDatabase(this.dbName);
+                    request.onsuccess = () => resolve(true);
+                    request.onerror = () => resolve(false);
+                    request.onblocked = () => resolve(false);
+                } catch (error) {
+                    resolve(false);
+                }
+            });
+        }
+    };
 
     // GalleryMeta 内部 transport：集中浏览器/HTTP 依赖，便于测试时替换。
     const GalleryMetaTransport = {
@@ -7794,6 +8020,27 @@
         rateLimitedUntil: 0,
         lastRateLimitDelayMs: 0,
         maxHeaderBackoffMs: 10 * 60 * 1000,
+        // 已确认持久缓存里没有的 id，避免同一任务反复查库。
+        storeMisses: new Set(),
+
+        // 发网络请求前先查持久缓存；命中则直接完成该任务，不占用限流额度。
+        async resolveFromStore(id) {
+            const stored = await GalleryMetaStore.get(id);
+            if (!stored) {
+                if (this.storeMisses.size > 2000) this.storeMisses.clear();
+                this.storeMisses.add(id);
+                return false;
+            }
+            const index = this.queue.findIndex(item => item.id === id);
+            if (index !== -1) this.queue.splice(index, 1);
+            const queued = this.queuedMap.get(id);
+            this.queuedMap.delete(id);
+            cache.set(id, stored);
+            PageMetaResolver.rememberResolvedMeta(id, stored);
+            RuntimeMetrics.storeHit++;
+            queued?.resolve(stored);
+            return true;
+        },
 
         pruneRecentRequests(now = GalleryMetaTransport.now()) {
             const threshold = now - this.requestWindowMs;
@@ -7920,6 +8167,7 @@
                 const meta = normalizeGalleryMeta(data || {});
                 cache.set(id, meta);
                 PageMetaResolver.rememberResolvedMeta(id, meta);
+                void GalleryMetaStore.put(id, meta);
                 RuntimeMetrics.fetchOk++;
                 return meta;
             } catch (e) {
@@ -7950,6 +8198,13 @@
             this.processing = true;
 
             while (this.queue.length > 0) {
+                const headId = this.queue[0].id;
+                if (!this.storeMisses.has(headId)) {
+                    // 命中或未命中都重新取队首：等待期间队列可能被 prioritize 重排。
+                    await this.resolveFromStore(headId);
+                    continue;
+                }
+
                 let now = GalleryMetaTransport.now();
                 if (this.rateLimitedUntil > now) {
                     await GalleryMetaTransport.sleep(this.rateLimitedUntil - now);
@@ -7963,6 +8218,12 @@
                 await this.waitForWindowSlot();
 
                 const { id } = this.queue.shift();
+                if (!this.storeMisses.has(id)) {
+                    // 限流等待期间队首换成了尚未查过持久缓存的任务，放回去先查库。
+                    this.queue.unshift({ id });
+                    continue;
+                }
+                this.storeMisses.delete(id);
                 const queued = this.queuedMap.get(id);
                 if (!queued) continue;
                 this.queuedMap.delete(id);
@@ -7995,6 +8256,7 @@
                 cacheHit: RuntimeMetrics.cacheHit,
                 cacheMiss: RuntimeMetrics.cacheMiss,
                 cacheHitRate: RuntimeMetrics.getCacheHitRate(),
+                storeHit: RuntimeMetrics.storeHit,
                 fetch429: RuntimeMetrics.fetch429,
                 pageListFetch: RuntimeMetrics.pageListFetch,
                 recentFailures: RuntimeMetrics.getRecentFailureCount(),
@@ -8588,13 +8850,13 @@
 
         setImageScalePercent(value) {
             const nextValue = Math.max(40, Math.min(160, Number(value) || 100));
-            Config.set('readingModeImageScalePercent', nextValue);
+            Config.setDeferred('readingModeImageScalePercent', nextValue);
             this.applyOverlayPreferences();
         },
 
         setImageGap(value) {
             const nextValue = Math.max(0, Math.min(80, Number(value) || 0));
-            Config.set('readingModeImageGap', nextValue);
+            Config.setDeferred('readingModeImageGap', nextValue);
             this.applyOverlayPreferences();
         },
 
@@ -9213,6 +9475,7 @@
         close() {
             if (!this.isOpen()) return;
             this.persistProgress();
+            Config.flush();
             this.clearSaveTimer();
             this.clearToolAutoHideTimer();
             this.teardownObservers();

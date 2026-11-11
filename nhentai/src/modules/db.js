@@ -52,6 +52,8 @@
         indexReady: false,
         worker: null,
         workerUrl: null,
+        // 搜索索引只在用户第一次聚焦搜索框后才构建；之前只需要 data / cnToItem。
+        workerWanted: false,
         pendingSearches: new Map(),
         searchId: 0,
         searchTimeoutMs: 3000,
@@ -104,7 +106,7 @@
             this.data = idbData;
             this.rebuildCnIndex();
             runContentTranslation();
-            this.initWorker();
+            this.syncWorker();
             if (shouldAutoIntervalUpdate || needsVersionUpdate || needsIntegrityUpdate) {
                 // 本地已有词库时先启用再后台更新，远端慢或不可达都不阻塞汉化与搜索联想。
                 this.update().catch(error => console.error('[nHentai Pro] 词库后台更新失败:', error));
@@ -143,10 +145,8 @@
                         this.data = currentData;
                         this.rebuildCnIndex();
                     }
-                    // init 已先用本地词库启动 Worker；正在建索引时不要重启。
-                    if (!this.worker) {
-                        this.initWorker();
-                    }
+                    // 已有 Worker（可能正在建索引）时不要重启。
+                    this.syncWorker();
                     if (status) {
                         status.textContent = getUIText('db_status_latest');
                         setTimeout(() => status.remove(), 2000);
@@ -182,7 +182,7 @@
                 }
                 runContentTranslation();
                 this.terminateWorker();
-                this.initWorker();
+                this.syncWorker();
                 if (force) location.reload();
             } catch (e) {
                 console.error(e);
@@ -192,7 +192,8 @@
                     this.data = currentData;
                     this.rebuildCnIndex();
                     runContentTranslation();
-                    this.initWorker();
+                    this.terminateWorker();
+                    this.syncWorker();
                 }
                 if (status) {
                     status.textContent = getUIText(canUseLocal ? 'db_status_failed_local' : 'db_status_failed');
@@ -453,6 +454,16 @@
             this.pendingSearches.forEach(resolve => resolve([]));
             this.pendingSearches.clear();
         },
+        // 搜索框首次聚焦时调用：标记需要索引，并在词库就绪时启动 Worker。
+        ensureWorker() {
+            this.workerWanted = true;
+            this.syncWorker();
+        },
+        // 需要索引、词库已加载且尚无 Worker 时才启动；其余情况不做事。
+        syncWorker() {
+            if (!this.workerWanted || this.worker || !this.data?.tag) return;
+            this.initWorker();
+        },
         // Worker 只负责搜索索引匹配，避免大词库检索阻塞主线程。
         initWorker() {
             if (this.worker) this.terminateWorker();
@@ -484,19 +495,13 @@
                         for (const en in map) {
                             if (ns === 'tag' && ['chinese', 'english', 'japanese'].includes(en)) continue;
                             const cn = map[en];
-                            const safeEn = escapeHtml(en);
-                            const safeCn = escapeHtml(cn);
-                            const safeBadge = escapeHtml(nsBadge);
-                            const contentHtml = cn ? safeEn + ' <span class="meta">' + safeCn + '</span>' : safeEn;
-                            const fullHtml = '<span class="type-badge">' + safeBadge + '</span><span class="content-wrapper">' + contentHtml + '</span>';
-
-                            const item = { term: en, display: fullHtml, value: en, namespace: ns, cn: cn, isCnInput: false };
+                            // 展示用 HTML 不在建索引时生成（8 万多条），只在返回结果时为命中项生成。
+                            const item = { term: en, value: en, namespace: ns, badge: nsBadge, cn: cn, isCnInput: false };
                             index.all.push(item);
                             index[ns].push(item);
 
                             if (cn) {
-                                const cnFullHtml = '<span class="type-badge">' + safeBadge + '</span><span class="content-wrapper">' + safeCn + ' <span class="meta">' + safeEn + '</span></span>';
-                                const cnItem = { term: cn.toLowerCase(), display: cnFullHtml, value: en, namespace: ns, cn: cn, isCnInput: true };
+                                const cnItem = { term: cn.toLowerCase(), value: en, namespace: ns, badge: nsBadge, cn: cn, isCnInput: true };
                                 index.all.push(cnItem);
                                 index[ns].push(cnItem);
                             }
@@ -518,6 +523,18 @@
                 return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch) {
                     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
                 });
+            }
+
+            function buildDisplay(item) {
+                const safeEn = escapeHtml(item.value);
+                const safeCn = escapeHtml(item.cn);
+                let contentHtml = safeEn;
+                if (item.cn) {
+                    contentHtml = item.isCnInput
+                        ? safeCn + ' <span class="meta">' + safeEn + '</span>'
+                        : safeEn + ' <span class="meta">' + safeCn + '</span>';
+                }
+                return '<span class="type-badge">' + escapeHtml(item.badge) + '</span><span class="content-wrapper">' + contentHtml + '</span>';
             }
 
             function compareIndexItems(a, b) {
@@ -637,7 +654,7 @@
                         const pluralNs = NS_PLURAL_MAP[m.item.namespace] || m.item.namespace;
                         const finalVal = \`\${pluralNs}:"\${m.item.value}"\`;
                         uniqueMap.set(uniqueKey, {
-                            display: m.item.display,
+                            item: m.item,
                             finalValue: finalVal,
                             originalMatch: m.originalMatch,
                             namespace: m.item.namespace,
@@ -647,7 +664,10 @@
                         });
                     }
                 });
-                return Array.from(uniqueMap.values()).slice(0, 50);
+                return Array.from(uniqueMap.values()).slice(0, 50).map(result => {
+                    const { item, ...rest } = result;
+                    return { display: buildDisplay(item), ...rest };
+                });
             }
         `;
             const blob = new Blob([workerScript], {

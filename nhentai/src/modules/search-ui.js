@@ -170,7 +170,8 @@
         if (input.dataset.nhSearchEnhanced === '1') return;
         input.dataset.nhSearchEnhanced = '1';
         form.addEventListener('submit', (e) => {
-            if (!DB.indexReady) return;
+            // 中文转英文语法只依赖 cnToItem，不需要等搜索索引（Worker）就绪。
+            if (!DB.data?.tag) return;
             const raw = input.value;
             const tokens = [];
             let match;
@@ -273,6 +274,8 @@
                 if (qtContainer) qtContainer.style.display = 'flex';
                 return;
             }
+            // 搜索索引懒加载：第一次聚焦搜索框时才启动 Worker 建索引。
+            DB.ensureWorker();
             if (!DB.indexReady) {
                 if (shouldShowSuggestionLoading(form) && (!loadingBox || !loadingBox.isConnected)) {
                     loadingBox = document.createElement('div');

@@ -240,13 +240,13 @@
 
         setImageScalePercent(value) {
             const nextValue = Math.max(40, Math.min(160, Number(value) || 100));
-            Config.set('readingModeImageScalePercent', nextValue);
+            Config.setDeferred('readingModeImageScalePercent', nextValue);
             this.applyOverlayPreferences();
         },
 
         setImageGap(value) {
             const nextValue = Math.max(0, Math.min(80, Number(value) || 0));
-            Config.set('readingModeImageGap', nextValue);
+            Config.setDeferred('readingModeImageGap', nextValue);
             this.applyOverlayPreferences();
         },
 
@@ -865,6 +865,7 @@
         close() {
             if (!this.isOpen()) return;
             this.persistProgress();
+            Config.flush();
             this.clearSaveTimer();
             this.clearToolAutoHideTimer();
             this.teardownObservers();

@@ -23,6 +23,27 @@
         rateLimitedUntil: 0,
         lastRateLimitDelayMs: 0,
         maxHeaderBackoffMs: 10 * 60 * 1000,
+        // 已确认持久缓存里没有的 id，避免同一任务反复查库。
+        storeMisses: new Set(),
+
+        // 发网络请求前先查持久缓存；命中则直接完成该任务，不占用限流额度。
+        async resolveFromStore(id) {
+            const stored = await GalleryMetaStore.get(id);
+            if (!stored) {
+                if (this.storeMisses.size > 2000) this.storeMisses.clear();
+                this.storeMisses.add(id);
+                return false;
+            }
+            const index = this.queue.findIndex(item => item.id === id);
+            if (index !== -1) this.queue.splice(index, 1);
+            const queued = this.queuedMap.get(id);
+            this.queuedMap.delete(id);
+            cache.set(id, stored);
+            PageMetaResolver.rememberResolvedMeta(id, stored);
+            RuntimeMetrics.storeHit++;
+            queued?.resolve(stored);
+            return true;
+        },
 
         pruneRecentRequests(now = GalleryMetaTransport.now()) {
             const threshold = now - this.requestWindowMs;
@@ -149,6 +170,7 @@
                 const meta = normalizeGalleryMeta(data || {});
                 cache.set(id, meta);
                 PageMetaResolver.rememberResolvedMeta(id, meta);
+                void GalleryMetaStore.put(id, meta);
                 RuntimeMetrics.fetchOk++;
                 return meta;
             } catch (e) {
@@ -179,6 +201,13 @@
             this.processing = true;
 
             while (this.queue.length > 0) {
+                const headId = this.queue[0].id;
+                if (!this.storeMisses.has(headId)) {
+                    // 命中或未命中都重新取队首：等待期间队列可能被 prioritize 重排。
+                    await this.resolveFromStore(headId);
+                    continue;
+                }
+
                 let now = GalleryMetaTransport.now();
                 if (this.rateLimitedUntil > now) {
                     await GalleryMetaTransport.sleep(this.rateLimitedUntil - now);
@@ -192,6 +221,12 @@
                 await this.waitForWindowSlot();
 
                 const { id } = this.queue.shift();
+                if (!this.storeMisses.has(id)) {
+                    // 限流等待期间队首换成了尚未查过持久缓存的任务，放回去先查库。
+                    this.queue.unshift({ id });
+                    continue;
+                }
+                this.storeMisses.delete(id);
                 const queued = this.queuedMap.get(id);
                 if (!queued) continue;
                 this.queuedMap.delete(id);
@@ -224,6 +259,7 @@
                 cacheHit: RuntimeMetrics.cacheHit,
                 cacheMiss: RuntimeMetrics.cacheMiss,
                 cacheHitRate: RuntimeMetrics.getCacheHitRate(),
+                storeHit: RuntimeMetrics.storeHit,
                 fetch429: RuntimeMetrics.fetch429,
                 pageListFetch: RuntimeMetrics.pageListFetch,
                 recentFailures: RuntimeMetrics.getRecentFailureCount(),

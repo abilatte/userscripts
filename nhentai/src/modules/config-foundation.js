@@ -117,6 +117,7 @@
         enableDetailQuickBlacklist: true,
         enableUserSettingsBlacklistFilter: true,
         showDevPanel: false,
+        enableMetaPersistentCache: true,
         disableAutoDbUpdate: true,
         apiKey: '',
         apiKeyTestStatus: '',
@@ -179,6 +180,9 @@
             if (this.settings.langFilter.includes('0')) {
                 this.settings.langFilter = [];
             }
+            if (typeof this.settings.enableMetaPersistentCache !== 'boolean') {
+                this.settings.enableMetaPersistentCache = DEFAULT_CONFIG.enableMetaPersistentCache;
+            }
             if (typeof this.settings.apiKey !== 'string') {
                 this.settings.apiKey = '';
             }
@@ -225,8 +229,23 @@
                 this.save();
             }
         },
+        saveTimer: null,
         save() {
+            if (this.saveTimer) {
+                clearTimeout(this.saveTimer);
+                this.saveTimer = null;
+            }
             GM_setValue('user_settings', JSON.stringify(this.settings));
+        },
+        // 高频调整（如 Ctrl+滚轮缩放）先改内存值，停止操作后再落盘一次。
+        setDeferred(key, val, delay = 400) {
+            this.settings[key] = val;
+            clearTimeout(this.saveTimer);
+            this.saveTimer = setTimeout(() => this.save(), delay);
+        },
+        // 有待落盘的延迟写入时立即写入（离开页面、退出阅读时调用）。
+        flush() {
+            if (this.saveTimer) this.save();
         },
         get(key) {
             return this.settings[key];
@@ -241,6 +260,7 @@
         }
     };
     Config.load();
+    window.addEventListener('pagehide', () => Config.flush());
 
     const Dict = {
         Nav: {
