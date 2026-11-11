@@ -1,6 +1,6 @@
 # nHentai Pro
 
-![Version](https://img.shields.io/badge/Version-2.8.2.16-ed2553?style=flat-square)
+![Version](https://img.shields.io/badge/Version-2.8.2.17-ed2553?style=flat-square)
 ![License](https://img.shields.io/badge/License-GPLv3-blue?style=flat-square)
 
 给 [nhentai.net](https://nhentai.net/) 加上**中文搜索、标签汉化、封面预览和卷轴阅读**。装好即用，所有选项都在导航栏的「设置」里。

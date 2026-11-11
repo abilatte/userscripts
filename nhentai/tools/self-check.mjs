@@ -82,32 +82,26 @@ const headerVersion = extractVersion(header, /@version\s+([0-9.]+)/, 'header 版
 const zhTitleVersion = extractVersion(settingsNavbar, /"title": "nHentai Pro .*? v([0-9.]+)"/, '设置标题中文版本号', failures);
 const enTitleVersion = extractVersion(settingsNavbar, /"title": "nHentai Pro Settings v([0-9.]+)"/, '设置标题英文版本号', failures);
 const panelVersion = extractVersion(settingsModal, /<span class="version">v([0-9.]+)<\/span>/, '设置面板角标版本号', failures);
-const buildOutputVersion = extractVersion(buildScript, /const outputFile = 'nhentai Pro-([0-9.]+)\.user\.js';/, '构建输出版本号', failures);
+// 产物文件名固定、不带版本号：GitHub raw 的 @updateURL 依赖稳定路径
+const expectedMainScript = 'nhentai-pro.user.js';
+const buildOutputMatch = buildScript.match(/const outputFile = '([^']+)';/);
+const buildOutputFile = buildOutputMatch ? buildOutputMatch[1] : '';
+const headerUpdateUrlCount = header
+  .split(/\r?\n/)
+  .filter(line => /^\/\/ @(updateURL|downloadURL)\s/.test(line) && line.trimEnd().endsWith(`/nhentai/${expectedMainScript}`))
+  .length;
 const readmeBadgeVersion = extractVersion(projectReadme, /Version-([0-9.]+)-ed2553/, 'README 版本徽章', failures);
 
-let agentsMainScriptVersion = '';
-let agentsCheckVersion = '';
+let agentsVersion = '';
 if (agentsDoc) {
-  agentsMainScriptVersion = extractVersion(
-    agentsDoc,
-    /nhentai Pro-([0-9.]+)\.user\.js/,
-    'AGENTS 主脚本版本号',
-    failures
-  );
-  agentsCheckVersion = extractVersion(
-    agentsDoc,
-    /node --check "nhentai Pro-([0-9.]+)\.user\.js"/,
-    'AGENTS 语法检查版本号',
-    failures
-  );
+  agentsVersion = extractVersion(agentsDoc, /现为 \*\*([0-9.]+)\*\*/, 'AGENTS 当前版本号', failures);
 } else {
   pass('AGENTS.md 未纳入仓库（本地可选），跳过其版本校验');
 }
 
-const expectedMainScript = `nhentai Pro-${headerVersion}.user.js`;
 const rootFiles = fs.readdirSync(rootDir, { withFileTypes: true });
 const rootUserScripts = rootFiles
-  .filter(entry => entry.isFile() && /^nhentai Pro-.*\.user\.js$/.test(entry.name))
+  .filter(entry => entry.isFile() && /\.user\.js$/.test(entry.name))
   .map(entry => entry.name)
   .sort();
 
@@ -148,16 +142,27 @@ if (rootUserScripts.length === 1 && rootUserScripts[0] === expectedMainScript) {
   fail(`根目录主脚本状态异常：${rootUserScripts.join(', ') || '无'}`, failures);
 }
 
+if (buildOutputFile === expectedMainScript) {
+  pass(`构建输出文件名固定为 ${expectedMainScript}`);
+} else {
+  fail(`构建输出文件名应为 ${expectedMainScript}，实际为 ${buildOutputFile || 'N/A'}`, failures);
+}
+
+if (headerUpdateUrlCount === 2) {
+  pass('@updateURL / @downloadURL 均指向固定产物文件名');
+} else {
+  fail(`@updateURL / @downloadURL 未同时指向 nhentai/${expectedMainScript}`, failures);
+}
+
 const versions = [
   ['header', headerVersion],
   ['settings.zh', zhTitleVersion],
   ['settings.en', enTitleVersion],
   ['panel', panelVersion],
-  ['build', buildOutputVersion],
   ['readme.badge', readmeBadgeVersion]
 ];
 if (agentsDoc) {
-  versions.push(['agents.main', agentsMainScriptVersion], ['agents.check', agentsCheckVersion]);
+  versions.push(['agents', agentsVersion]);
 }
 
 const uniqueVersions = Array.from(new Set(versions.map(([, version]) => version).filter(Boolean)));

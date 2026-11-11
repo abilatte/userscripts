@@ -9,7 +9,7 @@
 | [起点小说屏蔽工具](Qidian/) | 按书籍 ID 屏蔽起点「全部作品」页中不感兴趣的小说 | [安装](https://raw.githubusercontent.com/abilatte/userscripts/main/Qidian/qidian-novel-blocker.user.js) |
 | [小说阅读模式](novel-read/) | 在第三方小说站提供起点风格的阅读模式 | [安装](https://raw.githubusercontent.com/abilatte/userscripts/main/novel-read/dist/novel-reader.user.js) |
 | [Find Scripts Enhanced](find-scripts/) | 查找适用于当前网站的用户脚本，基于 [utags/userscripts](https://github.com/utags/userscripts) 修改 | [安装](https://raw.githubusercontent.com/abilatte/userscripts/main/find-scripts/find-scripts-enhanced.user.js) |
-| [nhentai Pro](nhentai/) | 中文标签搜索、标签汉化、封面预览、卷轴阅读 | 见目录内说明 |
+| [nhentai Pro](nhentai/) | 中文标签搜索、标签汉化、封面预览、卷轴阅读 | [安装](https://raw.githubusercontent.com/abilatte/userscripts/main/nhentai/nhentai-pro.user.js) |
 
 点击「安装」后脚本管理器会弹出安装页面。之后有新版本时会自动更新。
 

@@ -1,7 +1,7 @@
     // ===== 5. 搜索、翻译、语言筛选、设置 UI =====
     const SettingsUIDict = {
         'zh': {
-            "title": "nHentai Pro 设置 v2.8.2.16",
+            "title": "nHentai Pro 设置 v2.8.2.17",
             "tab_browse": "浏览",
             "tab_translate": "翻译",
             "tab_search": "搜索与筛选",
@@ -151,7 +151,7 @@
             "db_status_failed": "更新失败"
         },
         'en': {
-            "title": "nHentai Pro Settings v2.8.2.16",
+            "title": "nHentai Pro Settings v2.8.2.17",
             "tab_browse": "Browse",
             "tab_translate": "Translate",
             "tab_search": "Search",

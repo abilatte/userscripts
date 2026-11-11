@@ -36,7 +36,7 @@ const sourceFiles = [
   'src/modules/bootstrap.js',
 ];
 
-const outputFile = 'nhentai Pro-2.8.2.16.user.js';
+const outputFile = 'nhentai-pro.user.js';
 
 function readSourceFile(relativePath) {
   const absolutePath = path.join(rootDir, relativePath);
