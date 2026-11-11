@@ -2,7 +2,7 @@
 // @name         起点小说屏蔽工具
 // @name:en      Qidian Novel Blocker
 // @namespace    abilatte
-// @version      2.2
+// @version      2.3
 // @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
 // @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
 // @author       abilatte
@@ -40,7 +40,6 @@
     const SYNC_REPO_PATTERN = /^[\w.-]+\/[\w.-]+$/;
     const SYNC_PUSH_DELAY = 30 * 1000; // 本地改动后延迟上传，连续操作合并为一次提交
     const SYNC_PULL_INTERVAL = 2 * 60 * 1000; // 没有本地改动时检查远端的最小间隔
-    const SYNC_LOCK_DURATION = 60 * 1000; // 多个标签页之间的互斥时长
     const SYNC_TIMEOUT = 30 * 1000;
     const SYNC_MAX_CONFLICT_RETRIES = 2;
 
@@ -358,7 +357,6 @@
             lastSyncTime: 0,
             lastCheckTime: 0,
             lastError: "",
-            lockUntil: 0,
             ...GM_getValue(SYNC_STATE_KEY, {})
         }),
         // 状态可能被其他标签页或请求期间的本地改动更新，每次都基于最新值修改
@@ -369,7 +367,7 @@
         onChange: (fn) => Sync._listeners.push(fn),
         _emit: () => Sync._listeners.forEach((fn) => fn()),
 
-        isBusy: () => Sync._running || Sync.getState().lockUntil > Date.now(),
+        isBusy: () => Sync._running,
         describe: () => {
             if (!Sync.getConfig()) return "☁️ 同步未启用";
             if (Sync.isBusy()) return "☁️ 正在同步…";
@@ -429,6 +427,7 @@
                 nocache: true,
                 onload: resolve,
                 onerror: () => reject(new Error("无法连接 GitHub，请检查网络或代理")),
+                onabort: () => reject(new Error("请求被中断")),
                 ontimeout: () => reject(new Error("连接 GitHub 超时"))
             });
         }),
@@ -530,21 +529,23 @@
             Sync.settle(local, result.sha);
         },
 
-        // force 为 true 时忽略检查间隔。同步失败不影响屏蔽功能，错误显示在管理面板里
-        run: async ({ force = false } = {}) => {
+        // force：忽略检查间隔；pushOnly：只在有改动等待上传时才同步。
+        // 同步失败不影响屏蔽功能，错误显示在管理面板里。
+        // 「正在同步」只是当前页面的内存状态，不写进存储：页面可能在请求中途被刷新或关闭，
+        // 写进存储的标记会留下来挡住之后的页面。多个标签页同时同步是安全的，冲突由 sha 检查兜底
+        run: async ({ force = false, pushOnly = false } = {}) => {
             const config = Sync.getConfig();
             if (!config || Sync._running) return;
 
             const state = Sync.getState();
-            const now = Date.now();
-            if (state.lockUntil > now) return; // 其他标签页正在同步
             const hasPending = state.upsert.length > 0 || state.remove.length > 0;
-            const checkedRecently = now - state.lastCheckTime < SYNC_PULL_INTERVAL;
+            if (pushOnly && !hasPending) return;
+            const checkedRecently = Date.now() - state.lastCheckTime < SYNC_PULL_INTERVAL;
             if (!force && !hasPending && state.sha !== null && checkedRecently) return;
 
             Sync._running = true;
             clearTimeout(Sync._timer);
-            Sync.updateState({ lockUntil: now + SYNC_LOCK_DURATION });
+            Sync._emit();
             let lastError = "";
             try {
                 await Sync.syncOnce(config);
@@ -555,7 +556,6 @@
             Sync._running = false;
             const finishedAt = Date.now();
             Sync.updateState({
-                lockUntil: 0,
                 lastCheckTime: finishedAt,
                 lastError: lastError,
                 ...(lastError ? {} : { lastSyncTime: finishedAt })
@@ -1076,7 +1076,8 @@
                 if (remote) Sync._emit();
             });
         });
-        document.addEventListener("visibilitychange", () => Sync.run());
+        // 页面刷新或关闭时也会触发 hidden，这时只上传、不为了拉取而发请求
+        document.addEventListener("visibilitychange", () => Sync.run({ pushOnly: document.visibilityState === "hidden" }));
         Sync.run();
     }
 
