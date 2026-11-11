@@ -20,6 +20,24 @@
         });
     }
 
+    // 429 / 超时会让元数据请求返回空；清掉处理标记并延迟重新观察，否则该封面永远没有页数。
+    const PAGE_COUNT_MAX_RETRIES = 3;
+    const PAGE_COUNT_RETRY_BASE_MS = 5000;
+    const pageCountRetries = new WeakMap();
+
+    function schedulePageCountRetry(gallery, cover, href) {
+        const attempts = (pageCountRetries.get(gallery) || 0) + 1;
+        if (attempts > PAGE_COUNT_MAX_RETRIES) return;
+        pageCountRetries.set(gallery, attempts);
+        setTimeout(() => {
+            // 节点已移除或被站点复用到其它画廊时，不再沿用这次重试。
+            if (!gallery.isConnected || cover.getAttribute('href') !== href) return;
+            if (cover.querySelector('.nh-page-number')) return;
+            delete cover.dataset.pageProcessed;
+            if (Config.get('showPageNumbers')) pageObserver.observe(gallery);
+        }, PAGE_COUNT_RETRY_BASE_MS * attempts);
+    }
+
     async function loadPageCount(gallery) {
         const cover = gallery.querySelector('.cover');
         cleanupLegacyPageBadges(gallery);
@@ -44,9 +62,16 @@
             meta = await PageMetaResolver.resolve(id, { allowPartial: true });
             // 不在当前列表上下文里的画廊（如详情页“相似推荐”）回退到详情请求；与预取共享同一排队请求，不会重复发起。
             if (!meta) meta = await GalleryMeta.get(id);
+        } catch (error) {
+            console.error(`[nHentai Pro] Failed to resolve page count for ${id}:`, error);
         } finally {
             // Cleanup listener after load (or failure)
             gallery.removeEventListener('mouseenter', priorityHandler);
+        }
+
+        if (!meta || !meta.total) {
+            schedulePageCountRetry(gallery, cover, href);
+            return;
         }
 
         if (meta && meta.total) {

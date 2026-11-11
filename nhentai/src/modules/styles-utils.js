@@ -701,6 +701,21 @@
             color: #ffd3dd;
             border-color: rgba(255, 99, 132, 0.4);
         }
+        #nh-infinite-sentinel.is-actionable {
+            cursor: pointer;
+            color: #fff;
+            border-color: var(--nh-color-accent);
+        }
+        #nh-infinite-sentinel.is-actionable:hover {
+            background: rgba(237, 37, 83, 0.16);
+        }
+        [data-nh-infinite-appended="1"].index-container,
+        [data-nh-infinite-appended="1"].gallery-grid {
+            contain-intrinsic-size: auto 1200px;
+        }
+        .nh-offscreen-page {
+            content-visibility: auto;
+        }
         #nh-infinite-sentinel.is-done {
             color: var(--nh-color-text-muted);
             opacity: 0.85;

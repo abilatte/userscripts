@@ -70,6 +70,17 @@
         middleClickHandler: null,
         generation: 0,
         requestSerial: 0,
+        // 连续失败达到上限后停止自动重试，改为点击哨兵手动重试。
+        maxAutoRetries: 3,
+        retryBaseDelayMs: 1200,
+        consecutiveErrors: 0,
+        retryNotBefore: 0,
+        manualRetryRequired: false,
+        // 语言筛选/黑名单把整页都隐藏时哨兵一直可见，连续空页达到上限后暂停自动加载。
+        maxConsecutiveEmptyPages: 5,
+        consecutiveEmptyPages: 0,
+        pausedForEmptyPages: false,
+        offscreenObserver: null,
 
         isListPage() {
             if (!Config.get('enableInfiniteScroll')) return false;
@@ -350,30 +361,72 @@
             if (!this.sentinel || !this.sentinel.isConnected) {
                 this.sentinel = document.createElement('div');
                 this.sentinel.id = 'nh-infinite-sentinel';
+                this.sentinel.addEventListener('click', () => this.handleSentinelClick());
             }
             contentRoot.appendChild(this.sentinel);
             this.updateSentinelState();
         },
 
+        resetRetryState() {
+            this.consecutiveErrors = 0;
+            this.retryNotBefore = 0;
+            this.manualRetryRequired = false;
+        },
+
+        resetEmptyPageState() {
+            this.consecutiveEmptyPages = 0;
+            this.pausedForEmptyPages = false;
+        },
+
+        // 哨兵处于“点击重试 / 点击继续”状态时由用户手动恢复加载。
+        handleSentinelClick() {
+            if (!this.manualRetryRequired && !this.pausedForEmptyPages && this.status !== 'error') return;
+            if (this.isLoadingState() || !this.hasNextPage()) return;
+            this.resetRetryState();
+            this.resetEmptyPageState();
+            this.lastAttemptAt = 0;
+            this.markActivationSource('sentinel-click');
+            this.syncStatusByNextUrl();
+            this.loadNextPage({ manual: true });
+        },
+
         updateSentinelState(state = '') {
             if (!this.sentinel) return;
-            this.sentinel.classList.remove('is-loading', 'is-error', 'is-done');
+            this.sentinel.classList.remove('is-loading', 'is-error', 'is-done', 'is-actionable');
 
             let key = 'infinite_ready';
             if (state === 'syncing') {
                 key = 'infinite_sync';
             } else if (state === 'error' || this.status === 'error') {
-                key = 'infinite_error';
+                key = this.manualRetryRequired ? 'infinite_error_manual' : 'infinite_error';
                 this.sentinel.classList.add('is-error');
+                if (this.manualRetryRequired) this.sentinel.classList.add('is-actionable');
             } else if (state === 'loading' || this.isLoadingState()) {
                 key = 'infinite_loading';
                 this.sentinel.classList.add('is-loading');
             } else if (state === 'done' || this.status === 'done' || !this.hasNextPage()) {
                 key = 'infinite_done';
                 this.sentinel.classList.add('is-done');
+            } else if (this.pausedForEmptyPages) {
+                key = 'infinite_paused_empty';
+                this.sentinel.classList.add('is-actionable');
             }
 
-            this.sentinel.textContent = getUIText(key);
+            this.sentinel.textContent = getUIText(key).replace('{count}', String(this.consecutiveEmptyPages));
+        },
+
+        // 离视口很远的已加载分页跳过渲染；进入视口附近前恢复，避免 paint containment 裁掉悬停浮层。
+        observeOffscreenPage(container) {
+            if (!container || typeof IntersectionObserver !== 'function') return;
+            if (!window.CSS?.supports?.('content-visibility', 'auto')) return;
+            if (!this.offscreenObserver) {
+                this.offscreenObserver = new IntersectionObserver(entries => {
+                    entries.forEach(entry => {
+                        entry.target.classList.toggle('nh-offscreen-page', !entry.isIntersecting);
+                    });
+                }, { rootMargin: '1500px 0px' });
+            }
+            this.offscreenObserver.observe(container);
         },
 
         disconnectObserver() {
@@ -481,6 +534,12 @@
                 this.sentinel.remove();
             }
             this.sentinel = null;
+            if (this.offscreenObserver) {
+                this.offscreenObserver.disconnect();
+                this.offscreenObserver = null;
+            }
+            this.resetRetryState();
+            this.resetEmptyPageState();
             if (contentRoot) {
                 this.removeAppendedPageNodes(contentRoot);
                 this.clearPageMarkers(contentRoot);
@@ -539,6 +598,23 @@
             }
             this.ensureSentinel(contentRoot);
             refreshGalleryEnhancements(container, { translate: true });
+            this.observeOffscreenPage(container);
+            this.trackEmptyPage(container);
+        },
+
+        trackEmptyPage(container) {
+            const galleries = queryAll(container, GALLERY_SELECTORS.gallery);
+            if (!galleries.length) return;
+            // offsetParent 为 null 表示被语言筛选或黑名单隐藏（display: none）。
+            const hasVisibleGallery = galleries.some(gallery => gallery.offsetParent !== null);
+            if (hasVisibleGallery) {
+                this.resetEmptyPageState();
+                return;
+            }
+            this.consecutiveEmptyPages += 1;
+            if (this.consecutiveEmptyPages >= this.maxConsecutiveEmptyPages) {
+                this.pausedForEmptyPages = true;
+            }
         },
 
         syncRouteAfterAppend(requestUrl) {
@@ -561,8 +637,20 @@
         handleLoadError(error) {
             this.clearScheduledVisibilityChecks();
             this.clearScheduledNextUrlRecovery();
-            this.setStatus('error');
+            this.consecutiveErrors += 1;
             console.error('[nHentai Pro] Infinite scroll failed:', error);
+
+            if (this.consecutiveErrors >= this.maxAutoRetries) {
+                // 断网或被限流时不再循环请求，等用户点击哨兵。
+                this.manualRetryRequired = true;
+                this.setStatus('error');
+                this.disconnectObserver();
+                return;
+            }
+
+            const retryDelay = this.retryBaseDelayMs * (2 ** (this.consecutiveErrors - 1));
+            this.retryNotBefore = Date.now() + retryDelay;
+            this.setStatus('error');
             if (this.observer && this.sentinel) {
                 const generation = this.generation;
                 this.disconnectObserver();
@@ -572,7 +660,7 @@
                         this.syncStatusByNextUrl();
                         this.observe();
                     }
-                }, 1200);
+                }, retryDelay + 20);
             }
         },
 
@@ -678,10 +766,13 @@
             this.observe();
         },
 
-        async loadNextPage() {
+        async loadNextPage({ manual = false } = {}) {
             if (this.isLoadingState() || !this.hasNextPage()) return;
+            if (!manual && (this.manualRetryRequired || this.pausedForEmptyPages)) return;
 
             const now = Date.now();
+            // 失败后的退避窗口内，滚动/可见性检查都不再触发请求。
+            if (!manual && now < this.retryNotBefore) return;
             if (now - this.lastAttemptAt < 600) return;
             this.lastAttemptAt = now;
 
@@ -725,6 +816,7 @@
                 this.loadedUrls.add(requestUrl);
                 this.lastLoadedPageUrl = requestUrl;
                 this.resetPaginationRecovery();
+                this.resetRetryState();
                 this.nextUrl = pagination?.querySelector('a.next')?.href || '';
                 this.normalizeNewGalleryNodes(container);
 

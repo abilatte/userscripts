@@ -1730,6 +1730,21 @@
             color: #ffd3dd;
             border-color: rgba(255, 99, 132, 0.4);
         }
+        #nh-infinite-sentinel.is-actionable {
+            cursor: pointer;
+            color: #fff;
+            border-color: var(--nh-color-accent);
+        }
+        #nh-infinite-sentinel.is-actionable:hover {
+            background: rgba(237, 37, 83, 0.16);
+        }
+        [data-nh-infinite-appended="1"].index-container,
+        [data-nh-infinite-appended="1"].gallery-grid {
+            contain-intrinsic-size: auto 1200px;
+        }
+        .nh-offscreen-page {
+            content-visibility: auto;
+        }
         #nh-infinite-sentinel.is-done {
             color: var(--nh-color-text-muted);
             opacity: 0.85;
@@ -3372,6 +3387,8 @@
             "infinite_loading": "正在加载下一页...",
             "infinite_done": "已加载全部页面",
             "infinite_error": "下一页加载失败，继续下滑可重试",
+            "infinite_error_manual": "下一页连续加载失败，点击此处重试",
+            "infinite_paused_empty": "连续 {count} 页没有符合筛选的内容，点击此处继续加载",
             "infinite_page_marker": "第 {page} 页",
             "db_status_downloading": "正在下载汉化词库...",
             "db_status_checking": "正在检查词库更新...",
@@ -3522,6 +3539,8 @@
             "infinite_loading": "Loading the next page...",
             "infinite_done": "All pages loaded",
             "infinite_error": "Failed to load the next page, scroll again to retry",
+            "infinite_error_manual": "Loading failed repeatedly. Click here to retry",
+            "infinite_paused_empty": "{count} pages in a row had nothing matching your filters. Click here to keep loading",
             "infinite_page_marker": "Page {page}",
             "db_status_downloading": "Downloading translation database...",
             "db_status_checking": "Checking for database updates...",
@@ -6451,6 +6470,17 @@
         middleClickHandler: null,
         generation: 0,
         requestSerial: 0,
+        // 连续失败达到上限后停止自动重试，改为点击哨兵手动重试。
+        maxAutoRetries: 3,
+        retryBaseDelayMs: 1200,
+        consecutiveErrors: 0,
+        retryNotBefore: 0,
+        manualRetryRequired: false,
+        // 语言筛选/黑名单把整页都隐藏时哨兵一直可见，连续空页达到上限后暂停自动加载。
+        maxConsecutiveEmptyPages: 5,
+        consecutiveEmptyPages: 0,
+        pausedForEmptyPages: false,
+        offscreenObserver: null,
 
         isListPage() {
             if (!Config.get('enableInfiniteScroll')) return false;
@@ -6731,30 +6761,72 @@
             if (!this.sentinel || !this.sentinel.isConnected) {
                 this.sentinel = document.createElement('div');
                 this.sentinel.id = 'nh-infinite-sentinel';
+                this.sentinel.addEventListener('click', () => this.handleSentinelClick());
             }
             contentRoot.appendChild(this.sentinel);
             this.updateSentinelState();
         },
 
+        resetRetryState() {
+            this.consecutiveErrors = 0;
+            this.retryNotBefore = 0;
+            this.manualRetryRequired = false;
+        },
+
+        resetEmptyPageState() {
+            this.consecutiveEmptyPages = 0;
+            this.pausedForEmptyPages = false;
+        },
+
+        // 哨兵处于“点击重试 / 点击继续”状态时由用户手动恢复加载。
+        handleSentinelClick() {
+            if (!this.manualRetryRequired && !this.pausedForEmptyPages && this.status !== 'error') return;
+            if (this.isLoadingState() || !this.hasNextPage()) return;
+            this.resetRetryState();
+            this.resetEmptyPageState();
+            this.lastAttemptAt = 0;
+            this.markActivationSource('sentinel-click');
+            this.syncStatusByNextUrl();
+            this.loadNextPage({ manual: true });
+        },
+
         updateSentinelState(state = '') {
             if (!this.sentinel) return;
-            this.sentinel.classList.remove('is-loading', 'is-error', 'is-done');
+            this.sentinel.classList.remove('is-loading', 'is-error', 'is-done', 'is-actionable');
 
             let key = 'infinite_ready';
             if (state === 'syncing') {
                 key = 'infinite_sync';
             } else if (state === 'error' || this.status === 'error') {
-                key = 'infinite_error';
+                key = this.manualRetryRequired ? 'infinite_error_manual' : 'infinite_error';
                 this.sentinel.classList.add('is-error');
+                if (this.manualRetryRequired) this.sentinel.classList.add('is-actionable');
             } else if (state === 'loading' || this.isLoadingState()) {
                 key = 'infinite_loading';
                 this.sentinel.classList.add('is-loading');
             } else if (state === 'done' || this.status === 'done' || !this.hasNextPage()) {
                 key = 'infinite_done';
                 this.sentinel.classList.add('is-done');
+            } else if (this.pausedForEmptyPages) {
+                key = 'infinite_paused_empty';
+                this.sentinel.classList.add('is-actionable');
             }
 
-            this.sentinel.textContent = getUIText(key);
+            this.sentinel.textContent = getUIText(key).replace('{count}', String(this.consecutiveEmptyPages));
+        },
+
+        // 离视口很远的已加载分页跳过渲染；进入视口附近前恢复，避免 paint containment 裁掉悬停浮层。
+        observeOffscreenPage(container) {
+            if (!container || typeof IntersectionObserver !== 'function') return;
+            if (!window.CSS?.supports?.('content-visibility', 'auto')) return;
+            if (!this.offscreenObserver) {
+                this.offscreenObserver = new IntersectionObserver(entries => {
+                    entries.forEach(entry => {
+                        entry.target.classList.toggle('nh-offscreen-page', !entry.isIntersecting);
+                    });
+                }, { rootMargin: '1500px 0px' });
+            }
+            this.offscreenObserver.observe(container);
         },
 
         disconnectObserver() {
@@ -6862,6 +6934,12 @@
                 this.sentinel.remove();
             }
             this.sentinel = null;
+            if (this.offscreenObserver) {
+                this.offscreenObserver.disconnect();
+                this.offscreenObserver = null;
+            }
+            this.resetRetryState();
+            this.resetEmptyPageState();
             if (contentRoot) {
                 this.removeAppendedPageNodes(contentRoot);
                 this.clearPageMarkers(contentRoot);
@@ -6920,6 +6998,23 @@
             }
             this.ensureSentinel(contentRoot);
             refreshGalleryEnhancements(container, { translate: true });
+            this.observeOffscreenPage(container);
+            this.trackEmptyPage(container);
+        },
+
+        trackEmptyPage(container) {
+            const galleries = queryAll(container, GALLERY_SELECTORS.gallery);
+            if (!galleries.length) return;
+            // offsetParent 为 null 表示被语言筛选或黑名单隐藏（display: none）。
+            const hasVisibleGallery = galleries.some(gallery => gallery.offsetParent !== null);
+            if (hasVisibleGallery) {
+                this.resetEmptyPageState();
+                return;
+            }
+            this.consecutiveEmptyPages += 1;
+            if (this.consecutiveEmptyPages >= this.maxConsecutiveEmptyPages) {
+                this.pausedForEmptyPages = true;
+            }
         },
 
         syncRouteAfterAppend(requestUrl) {
@@ -6942,8 +7037,20 @@
         handleLoadError(error) {
             this.clearScheduledVisibilityChecks();
             this.clearScheduledNextUrlRecovery();
-            this.setStatus('error');
+            this.consecutiveErrors += 1;
             console.error('[nHentai Pro] Infinite scroll failed:', error);
+
+            if (this.consecutiveErrors >= this.maxAutoRetries) {
+                // 断网或被限流时不再循环请求，等用户点击哨兵。
+                this.manualRetryRequired = true;
+                this.setStatus('error');
+                this.disconnectObserver();
+                return;
+            }
+
+            const retryDelay = this.retryBaseDelayMs * (2 ** (this.consecutiveErrors - 1));
+            this.retryNotBefore = Date.now() + retryDelay;
+            this.setStatus('error');
             if (this.observer && this.sentinel) {
                 const generation = this.generation;
                 this.disconnectObserver();
@@ -6953,7 +7060,7 @@
                         this.syncStatusByNextUrl();
                         this.observe();
                     }
-                }, 1200);
+                }, retryDelay + 20);
             }
         },
 
@@ -7059,10 +7166,13 @@
             this.observe();
         },
 
-        async loadNextPage() {
+        async loadNextPage({ manual = false } = {}) {
             if (this.isLoadingState() || !this.hasNextPage()) return;
+            if (!manual && (this.manualRetryRequired || this.pausedForEmptyPages)) return;
 
             const now = Date.now();
+            // 失败后的退避窗口内，滚动/可见性检查都不再触发请求。
+            if (!manual && now < this.retryNotBefore) return;
             if (now - this.lastAttemptAt < 600) return;
             this.lastAttemptAt = now;
 
@@ -7106,6 +7216,7 @@
                 this.loadedUrls.add(requestUrl);
                 this.lastLoadedPageUrl = requestUrl;
                 this.resetPaginationRecovery();
+                this.resetRetryState();
                 this.nextUrl = pagination?.querySelector('a.next')?.href || '';
                 this.normalizeNewGalleryNodes(container);
 
@@ -7944,6 +8055,24 @@
         });
     }
 
+    // 429 / 超时会让元数据请求返回空；清掉处理标记并延迟重新观察，否则该封面永远没有页数。
+    const PAGE_COUNT_MAX_RETRIES = 3;
+    const PAGE_COUNT_RETRY_BASE_MS = 5000;
+    const pageCountRetries = new WeakMap();
+
+    function schedulePageCountRetry(gallery, cover, href) {
+        const attempts = (pageCountRetries.get(gallery) || 0) + 1;
+        if (attempts > PAGE_COUNT_MAX_RETRIES) return;
+        pageCountRetries.set(gallery, attempts);
+        setTimeout(() => {
+            // 节点已移除或被站点复用到其它画廊时，不再沿用这次重试。
+            if (!gallery.isConnected || cover.getAttribute('href') !== href) return;
+            if (cover.querySelector('.nh-page-number')) return;
+            delete cover.dataset.pageProcessed;
+            if (Config.get('showPageNumbers')) pageObserver.observe(gallery);
+        }, PAGE_COUNT_RETRY_BASE_MS * attempts);
+    }
+
     async function loadPageCount(gallery) {
         const cover = gallery.querySelector('.cover');
         cleanupLegacyPageBadges(gallery);
@@ -7968,9 +8097,16 @@
             meta = await PageMetaResolver.resolve(id, { allowPartial: true });
             // 不在当前列表上下文里的画廊（如详情页“相似推荐”）回退到详情请求；与预取共享同一排队请求，不会重复发起。
             if (!meta) meta = await GalleryMeta.get(id);
+        } catch (error) {
+            console.error(`[nHentai Pro] Failed to resolve page count for ${id}:`, error);
         } finally {
             // Cleanup listener after load (or failure)
             gallery.removeEventListener('mouseenter', priorityHandler);
+        }
+
+        if (!meta || !meta.total) {
+            schedulePageCountRetry(gallery, cover, href);
+            return;
         }
 
         if (meta && meta.total) {
@@ -10351,6 +10487,15 @@
         });
     }
 
+    // 汉化与增强都只处理 context 的后代；新增的是叶子节点（单个标签、时间、标题）时改用父节点作上下文。
+    function getObservedNodeContext(node) {
+        if (!node?.matches?.('.tag, .tagchip, .name, .count, a, span, time, h1, h2')) return node;
+        return node.parentElement || node;
+    }
+
+    // 一次批量里新增节点过多时，逐个增量处理反而比整页刷新慢。
+    const MAX_INCREMENTAL_OBSERVED_NODES = 40;
+
     function processObservedNodes(liveNodes, { fullRefresh = false } = {}) {
         if (!liveNodes.length) return;
 
@@ -10361,7 +10506,7 @@
             return;
         }
 
-        const topLevelNodes = getTopLevelObservedNodes(liveNodes);
+        const topLevelNodes = getTopLevelObservedNodes(liveNodes.map(getObservedNodeContext));
         topLevelNodes.forEach(node => {
             runUITranslation(node);
             runContentTranslation(node);
@@ -10423,9 +10568,9 @@
                 if (mutation.addedNodes.length > 0) mutation.addedNodes.forEach(node => {
                     // 无限滚动追加的节点已在 appendLoadedPage 中增强过，避免每追加一页都触发整页全量刷新。
                     if (node.dataset?.nhInfiniteAppended === '1') return;
+                    // 新增节点只处理自身子树；属性变化（节点被站点复用）才需要整页重跑。
                     if (node.nodeType === 1 && isGalleryRelatedNode(node)) {
                         pendingNodes.add(node);
-                        needsFullRefresh = true;
                     }
                 });
             });
@@ -10434,7 +10579,9 @@
             observerTimeout = setTimeout(() => {
                 const liveNodes = Array.from(pendingNodes).filter(node => document.contains(node));
                 pendingNodes.clear();
-                processObservedNodes(liveNodes, { fullRefresh: needsFullRefresh });
+                processObservedNodes(liveNodes, {
+                    fullRefresh: needsFullRefresh || liveNodes.length > MAX_INCREMENTAL_OBSERVED_NODES
+                });
                 needsFullRefresh = false;
             }, 100);
         });

@@ -10,6 +10,15 @@
         });
     }
 
+    // 汉化与增强都只处理 context 的后代；新增的是叶子节点（单个标签、时间、标题）时改用父节点作上下文。
+    function getObservedNodeContext(node) {
+        if (!node?.matches?.('.tag, .tagchip, .name, .count, a, span, time, h1, h2')) return node;
+        return node.parentElement || node;
+    }
+
+    // 一次批量里新增节点过多时，逐个增量处理反而比整页刷新慢。
+    const MAX_INCREMENTAL_OBSERVED_NODES = 40;
+
     function processObservedNodes(liveNodes, { fullRefresh = false } = {}) {
         if (!liveNodes.length) return;
 
@@ -20,7 +29,7 @@
             return;
         }
 
-        const topLevelNodes = getTopLevelObservedNodes(liveNodes);
+        const topLevelNodes = getTopLevelObservedNodes(liveNodes.map(getObservedNodeContext));
         topLevelNodes.forEach(node => {
             runUITranslation(node);
             runContentTranslation(node);
@@ -82,9 +91,9 @@
                 if (mutation.addedNodes.length > 0) mutation.addedNodes.forEach(node => {
                     // 无限滚动追加的节点已在 appendLoadedPage 中增强过，避免每追加一页都触发整页全量刷新。
                     if (node.dataset?.nhInfiniteAppended === '1') return;
+                    // 新增节点只处理自身子树；属性变化（节点被站点复用）才需要整页重跑。
                     if (node.nodeType === 1 && isGalleryRelatedNode(node)) {
                         pendingNodes.add(node);
-                        needsFullRefresh = true;
                     }
                 });
             });
@@ -93,7 +102,9 @@
             observerTimeout = setTimeout(() => {
                 const liveNodes = Array.from(pendingNodes).filter(node => document.contains(node));
                 pendingNodes.clear();
-                processObservedNodes(liveNodes, { fullRefresh: needsFullRefresh });
+                processObservedNodes(liveNodes, {
+                    fullRefresh: needsFullRefresh || liveNodes.length > MAX_INCREMENTAL_OBSERVED_NODES
+                });
                 needsFullRefresh = false;
             }, 100);
         });
