@@ -1,0 +1,34 @@
+# 旧的独立 git 记录备份
+/.git-backup/
+
+# 第三方脚本（非本人编写，仅本地使用）
+/Bypass All Shortlinks/
+/bilibili subtitle exporter/
+Pagetual.user.js
+
+# AI / 代理相关
+AGENTS.md
+AGENTS.*.md
+CLAUDE.md
+GEMINI.md
+.agents/
+.agent/
+.claude/
+.codex/
+.cursor/
+**/docs/plans/
+
+# 测试（按约定不公开，仅保留在本地）
+/novel-read/tests/
+/nhentai/tools/test-*
+
+# 备份
+*.bak
+*.bak.js
+
+# 本地 / 编辑器 / 依赖
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+node_modules/

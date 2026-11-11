@@ -1,0 +1,35 @@
+# 本地 / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# 本地工具缓存
+.playwright-mcp/
+node_modules/
+
+# 临时备份（历史用 git，不留 bak）
+*.bak
+*.user.js.bak
+
+# 运行时输出（若以后再生成）
+outputs/
+
+# ---------- AI / 代理相关（本地可用，不纳入仓库、不上传）----------
+AGENTS.md
+Agents.md
+CLAUDE.md
+Claude.md
+GEMINI.md
+.cursor/
+.claude/
+.codex/
+.grok/
+.agent/
+.agents/
+.github/copilot*
+**/*copilot*
+**/prompt*.md
+**/PROMPTS*

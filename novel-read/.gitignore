@@ -1,0 +1,4 @@
+node_modules/
+# 构建产物中只保留可安装的成品脚本，供脚本管理器自动更新
+dist/*
+!dist/novel-reader.user.js

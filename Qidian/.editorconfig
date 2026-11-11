@@ -1,0 +1,13 @@
+root = true
+
+[*.js]
+charset = utf-8-bom
+end_of_line = crlf
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+
+[*.md]
+charset = utf-8-bom
+end_of_line = crlf
+insert_final_newline = true
