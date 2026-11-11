@@ -78,7 +78,6 @@
         .nh-original-tag { font-size: 90%; color: var(--nh-color-text-muted); margin-left: 4px; }
         .nh-inline-subtag { font-size: 85%; opacity: 0.7; margin-left: 2px; }
         .tag:hover .nh-translated-tag, .tag:hover .nh-original-tag { color: rgba(255,255,255,0.8); }
-        #nh-db-status { font-size: var(--nh-font-size-sm); color: var(--nh-color-accent); margin-left: 10px; display: inline-block; }
         #nh-toast-root { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 10100; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: calc(100vw - 32px); pointer-events: none; }
         .nh-toast { padding: 9px 16px; border-radius: var(--nh-radius-md); background: rgba(20,20,20,0.94); color: var(--nh-color-text); border: 1px solid var(--nh-color-border-strong); box-shadow: var(--nh-shadow-md); font-family: var(--nh-font-family); font-size: var(--nh-font-size-md); line-height: 1.4; animation: fadeIn 0.2s ease-out; }
         .nh-toast-error { color: #ffd3dd; border-color: rgba(255, 99, 132, 0.55); }

@@ -69,7 +69,7 @@
             return requiredNamespaces.every(ns => data[ns] && Object.keys(data[ns]).length > 0);
         },
         async init() {
-            GM_registerMenuCommand("强制更新汉化数据库", () => this.update(true));
+            GM_registerMenuCommand(getUIText('menu_force_update'), () => this.update(true));
             let dbMeta = (await IDB_Helper.get('db_meta')) || {
                 lastUpdate: 0,
                 version: 0
@@ -112,15 +112,29 @@
                 this.update().catch(error => console.error('[nHentai Pro] 词库后台更新失败:', error));
             }
         },
-        async update(force = false) {
-            const form = document.querySelector('form[action="/search/"]');
-            let status = document.getElementById('nh-db-status');
-            if (form && !status) {
-                status = document.createElement('span');
-                status.id = 'nh-db-status';
-                form.appendChild(status);
+        statusToast: null,
+        statusHideTimer: null,
+        // 词库状态用页面底部的轻提示展示，不再塞进搜索表单挤占搜索框。
+        // hideAfterMs 为 0 时常驻（下载中、彻底失败），大于 0 时到时收起。
+        setStatus(key, { hideAfterMs = 0, error = false } = {}) {
+            clearTimeout(this.statusHideTimer);
+            this.statusHideTimer = null;
+            if (!this.statusToast?.isConnected) {
+                this.statusToast = showToast(getUIText(key), { duration: 0 });
             }
-            if (status) status.textContent = getUIText('db_status_downloading');
+            if (!this.statusToast) return;
+            this.statusToast.id = 'nh-db-status';
+            this.statusToast.textContent = getUIText(key);
+            this.statusToast.classList.toggle('nh-toast-error', error);
+            if (hideAfterMs > 0) {
+                this.statusHideTimer = setTimeout(() => {
+                    this.statusToast?.remove();
+                    this.statusToast = null;
+                }, hideAfterMs);
+            }
+        },
+        async update(force = false) {
+            this.setStatus('db_status_downloading');
             const currentMeta = (await IDB_Helper.get('db_meta')) || {
                 lastUpdate: 0,
                 version: 0,
@@ -132,7 +146,7 @@
                 : await IDB_Helper.get('tag_db');
 
             if (!force && this.hasRequiredNamespaces(currentData) && currentMeta.version >= DB_VERSION) {
-                if (status) status.textContent = getUIText('db_status_checking');
+                this.setStatus('db_status_checking');
                 // 只比对 40 字节的 sha；取不到 sha 或本地来自备用源（无 sha）时按有更新处理。
                 const remoteSha = await this.fetchReleaseSha();
                 if (remoteSha && remoteSha === currentMeta.sha) {
@@ -147,20 +161,17 @@
                     }
                     // 已有 Worker（可能正在建索引）时不要重启。
                     this.syncWorker();
-                    if (status) {
-                        status.textContent = getUIText('db_status_latest');
-                        setTimeout(() => status.remove(), 2000);
-                    }
+                    this.setStatus('db_status_latest', { hideAfterMs: 2000 });
                     return;
                 }
-                if (status) status.textContent = getUIText('db_status_downloading');
+                this.setStatus('db_status_downloading');
             }
 
             try {
                 let download = await this.downloadReleaseDatabase();
                 if (!this.hasRequiredNamespaces(download.data)) {
                     console.warn('[nHentai Pro] EhTag 词库不完整，尝试兜底镜像...');
-                    if (status) status.textContent = getUIText('db_status_fallback');
+                    this.setStatus('db_status_fallback');
                     download = await this.downloadTagDatabase(LEGACY_TAG_DB_SOURCES, 'legacy');
                 }
                 if (!this.hasRequiredNamespaces(download.data)) {
@@ -176,10 +187,7 @@
                 });
                 this.data = download.data;
                 this.rebuildCnIndex();
-                if (status) {
-                    status.textContent = getUIText(download.provider === 'ehtag' ? 'db_status_done' : 'db_status_done_fallback');
-                    setTimeout(() => status.remove(), 2000);
-                }
+                this.setStatus(download.provider === 'ehtag' ? 'db_status_done' : 'db_status_done_fallback', { hideAfterMs: 2000 });
                 runContentTranslation();
                 this.terminateWorker();
                 this.syncWorker();
@@ -195,11 +203,11 @@
                     this.terminateWorker();
                     this.syncWorker();
                 }
-                if (status) {
-                    status.textContent = getUIText(canUseLocal ? 'db_status_failed_local' : 'db_status_failed');
-                    // 本地词库可用时功能不受影响，提示几秒后收起；完全不可用时保留提示。
-                    if (canUseLocal) setTimeout(() => status.remove(), 5000);
-                }
+                // 本地词库可用时功能不受影响，提示几秒后收起；完全不可用时保留提示。
+                this.setStatus(canUseLocal ? 'db_status_failed_local' : 'db_status_failed', {
+                    hideAfterMs: canUseLocal ? 5000 : 0,
+                    error: true
+                });
             }
         },
         createEmptyTagData() {

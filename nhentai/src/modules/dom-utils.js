@@ -23,7 +23,7 @@
         return Boolean(target?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]'));
     }
 
-    // 页面内轻提示：替代 alert()，不阻塞操作，到时自动消失。
+    // 页面内轻提示：替代 alert()，不阻塞操作，到时自动消失；duration 为 0 时常驻，由调用方移除。
     function showToast(message, { type = 'info', duration = 3200 } = {}) {
         if (!message || !document.body) return null;
         let root = document.getElementById('nh-toast-root');
@@ -38,7 +38,7 @@
         toast.className = `nh-toast nh-toast-${type}`;
         toast.textContent = message;
         root.appendChild(toast);
-        setTimeout(() => toast.remove(), Math.max(1000, duration));
+        if (duration > 0) setTimeout(() => toast.remove(), Math.max(1000, duration));
         return toast;
     }
 

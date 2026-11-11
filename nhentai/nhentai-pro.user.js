@@ -581,7 +581,7 @@
         return Boolean(target?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]'));
     }
 
-    // 页面内轻提示：替代 alert()，不阻塞操作，到时自动消失。
+    // 页面内轻提示：替代 alert()，不阻塞操作，到时自动消失；duration 为 0 时常驻，由调用方移除。
     function showToast(message, { type = 'info', duration = 3200 } = {}) {
         if (!message || !document.body) return null;
         let root = document.getElementById('nh-toast-root');
@@ -596,7 +596,7 @@
         toast.className = `nh-toast nh-toast-${type}`;
         toast.textContent = message;
         root.appendChild(toast);
-        setTimeout(() => toast.remove(), Math.max(1000, duration));
+        if (duration > 0) setTimeout(() => toast.remove(), Math.max(1000, duration));
         return toast;
     }
 
@@ -1127,7 +1127,6 @@
         .nh-original-tag { font-size: 90%; color: var(--nh-color-text-muted); margin-left: 4px; }
         .nh-inline-subtag { font-size: 85%; opacity: 0.7; margin-left: 2px; }
         .tag:hover .nh-translated-tag, .tag:hover .nh-original-tag { color: rgba(255,255,255,0.8); }
-        #nh-db-status { font-size: var(--nh-font-size-sm); color: var(--nh-color-accent); margin-left: 10px; display: inline-block; }
         #nh-toast-root { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 10100; display: flex; flex-direction: column; align-items: center; gap: 8px; width: max-content; max-width: calc(100vw - 32px); pointer-events: none; }
         .nh-toast { padding: 9px 16px; border-radius: var(--nh-radius-md); background: rgba(20,20,20,0.94); color: var(--nh-color-text); border: 1px solid var(--nh-color-border-strong); box-shadow: var(--nh-shadow-md); font-family: var(--nh-font-family); font-size: var(--nh-font-size-md); line-height: 1.4; animation: fadeIn 0.2s ease-out; }
         .nh-toast-error { color: #ffd3dd; border-color: rgba(255, 99, 132, 0.55); }
@@ -2641,7 +2640,7 @@
             return requiredNamespaces.every(ns => data[ns] && Object.keys(data[ns]).length > 0);
         },
         async init() {
-            GM_registerMenuCommand("强制更新汉化数据库", () => this.update(true));
+            GM_registerMenuCommand(getUIText('menu_force_update'), () => this.update(true));
             let dbMeta = (await IDB_Helper.get('db_meta')) || {
                 lastUpdate: 0,
                 version: 0
@@ -2684,15 +2683,29 @@
                 this.update().catch(error => console.error('[nHentai Pro] 词库后台更新失败:', error));
             }
         },
-        async update(force = false) {
-            const form = document.querySelector('form[action="/search/"]');
-            let status = document.getElementById('nh-db-status');
-            if (form && !status) {
-                status = document.createElement('span');
-                status.id = 'nh-db-status';
-                form.appendChild(status);
+        statusToast: null,
+        statusHideTimer: null,
+        // 词库状态用页面底部的轻提示展示，不再塞进搜索表单挤占搜索框。
+        // hideAfterMs 为 0 时常驻（下载中、彻底失败），大于 0 时到时收起。
+        setStatus(key, { hideAfterMs = 0, error = false } = {}) {
+            clearTimeout(this.statusHideTimer);
+            this.statusHideTimer = null;
+            if (!this.statusToast?.isConnected) {
+                this.statusToast = showToast(getUIText(key), { duration: 0 });
             }
-            if (status) status.textContent = getUIText('db_status_downloading');
+            if (!this.statusToast) return;
+            this.statusToast.id = 'nh-db-status';
+            this.statusToast.textContent = getUIText(key);
+            this.statusToast.classList.toggle('nh-toast-error', error);
+            if (hideAfterMs > 0) {
+                this.statusHideTimer = setTimeout(() => {
+                    this.statusToast?.remove();
+                    this.statusToast = null;
+                }, hideAfterMs);
+            }
+        },
+        async update(force = false) {
+            this.setStatus('db_status_downloading');
             const currentMeta = (await IDB_Helper.get('db_meta')) || {
                 lastUpdate: 0,
                 version: 0,
@@ -2704,7 +2717,7 @@
                 : await IDB_Helper.get('tag_db');
 
             if (!force && this.hasRequiredNamespaces(currentData) && currentMeta.version >= DB_VERSION) {
-                if (status) status.textContent = getUIText('db_status_checking');
+                this.setStatus('db_status_checking');
                 // 只比对 40 字节的 sha；取不到 sha 或本地来自备用源（无 sha）时按有更新处理。
                 const remoteSha = await this.fetchReleaseSha();
                 if (remoteSha && remoteSha === currentMeta.sha) {
@@ -2719,20 +2732,17 @@
                     }
                     // 已有 Worker（可能正在建索引）时不要重启。
                     this.syncWorker();
-                    if (status) {
-                        status.textContent = getUIText('db_status_latest');
-                        setTimeout(() => status.remove(), 2000);
-                    }
+                    this.setStatus('db_status_latest', { hideAfterMs: 2000 });
                     return;
                 }
-                if (status) status.textContent = getUIText('db_status_downloading');
+                this.setStatus('db_status_downloading');
             }
 
             try {
                 let download = await this.downloadReleaseDatabase();
                 if (!this.hasRequiredNamespaces(download.data)) {
                     console.warn('[nHentai Pro] EhTag 词库不完整，尝试兜底镜像...');
-                    if (status) status.textContent = getUIText('db_status_fallback');
+                    this.setStatus('db_status_fallback');
                     download = await this.downloadTagDatabase(LEGACY_TAG_DB_SOURCES, 'legacy');
                 }
                 if (!this.hasRequiredNamespaces(download.data)) {
@@ -2748,10 +2758,7 @@
                 });
                 this.data = download.data;
                 this.rebuildCnIndex();
-                if (status) {
-                    status.textContent = getUIText(download.provider === 'ehtag' ? 'db_status_done' : 'db_status_done_fallback');
-                    setTimeout(() => status.remove(), 2000);
-                }
+                this.setStatus(download.provider === 'ehtag' ? 'db_status_done' : 'db_status_done_fallback', { hideAfterMs: 2000 });
                 runContentTranslation();
                 this.terminateWorker();
                 this.syncWorker();
@@ -2767,11 +2774,11 @@
                     this.terminateWorker();
                     this.syncWorker();
                 }
-                if (status) {
-                    status.textContent = getUIText(canUseLocal ? 'db_status_failed_local' : 'db_status_failed');
-                    // 本地词库可用时功能不受影响，提示几秒后收起；完全不可用时保留提示。
-                    if (canUseLocal) setTimeout(() => status.remove(), 5000);
-                }
+                // 本地词库可用时功能不受影响，提示几秒后收起；完全不可用时保留提示。
+                this.setStatus(canUseLocal ? 'db_status_failed_local' : 'db_status_failed', {
+                    hideAfterMs: canUseLocal ? 5000 : 0,
+                    error: true
+                });
             }
         },
         createEmptyTagData() {
@@ -3389,6 +3396,18 @@
             "btn_cancel": "取消",
             "btn_save": "保存设置",
             "confirm_update": "确定要从 EhTagTranslation 重新下载汉化词库吗？将直接拉取社区维护的最新数据。",
+            "btn_confirm_again": "再次点击确认",
+            "grp_backup": "备份与重置",
+            "desc_backup": "导出文件包含全部设置和阅读进度，不含 API Key。导入会覆盖当前设置并合并阅读进度。",
+            "btn_export": "导出设置",
+            "btn_import": "导入设置",
+            "btn_reset": "恢复默认",
+            "confirm_reset": "将把所有设置恢复为默认值（保留 API Key 和阅读进度），页面会刷新。",
+            "msg_export_done": "已导出设置文件",
+            "msg_import_invalid": "导入失败：不是有效的 nHentai Pro 设置文件",
+            "menu_force_update": "强制更新汉化数据库",
+            "menu_toggle_settings_button": "显示/隐藏网页设置按钮",
+            "menu_open_settings": "打开助手设置",
             "qt_parodies": "原作",
             "qt_characters": "角色",
             "qt_tags": "标签",
@@ -3543,6 +3562,18 @@
             "btn_cancel": "Cancel",
             "btn_save": "Save Settings",
             "confirm_update": "Redownload translation database from EhTagTranslation?",
+            "btn_confirm_again": "Click again to confirm",
+            "grp_backup": "Backup & Reset",
+            "desc_backup": "The export includes all settings and reading progress, but not the API key. Importing overwrites current settings and merges reading progress.",
+            "btn_export": "Export Settings",
+            "btn_import": "Import Settings",
+            "btn_reset": "Restore Defaults",
+            "confirm_reset": "All settings will be restored to defaults (API key and reading progress are kept). The page will reload.",
+            "msg_export_done": "Settings file exported",
+            "msg_import_invalid": "Import failed: not a valid nHentai Pro settings file",
+            "menu_force_update": "Force update translation database",
+            "menu_toggle_settings_button": "Show/hide the on-page settings button",
+            "menu_open_settings": "Open settings",
             "qt_parodies": "Parodies",
             "qt_characters": "Characters",
             "qt_tags": "Tags",
@@ -3607,13 +3638,13 @@
     }
 
     function setupSettingsUI() {
-        GM_registerMenuCommand("显示/隐藏网页设置按钮", () => {
+        GM_registerMenuCommand(getUIText('menu_toggle_settings_button'), () => {
             const current = Config.get('showPageSettingsButton');
             Config.set('showPageSettingsButton', !current);
             updatePageSettingsButton();
         });
         // 菜单回调会收到事件参数，不能直接当作 showSettingsModal 的选项传入。
-        GM_registerMenuCommand("打开助手设置", () => showSettingsModal());
+        GM_registerMenuCommand(getUIText('menu_open_settings'), () => showSettingsModal());
     }
 
     function updatePageSettingsButton() {
@@ -4079,8 +4110,19 @@
                         <label class="nh-switch"><input type="checkbox" id="cfg-meta-cache" ${config.metaCache ? 'checked' : ''}><span class="nh-slider"></span></label>
                     </div>
                     <div class="nh-force-update-wrap">
-                        <button class="nh-btn nh-btn-secondary nh-btn-block" id="nh-force-update"><i class="fa fa-refresh"></i> ${t('btn_update')}</button>
+                        <button type="button" class="nh-btn nh-btn-secondary nh-btn-block" id="nh-force-update"><i class="fa fa-refresh"></i> ${t('btn_update')}</button>
                     </div>
+                    <div class="nh-setting-group-title">${t('grp_backup')}</div>
+                    <div class="nh-api-key-card">
+                        <div class="nh-info-text">${t('desc_backup')}</div>
+                        <div class="nh-api-key-actions">
+                            <button type="button" class="nh-btn nh-btn-secondary" id="nh-settings-export">${t('btn_export')}</button>
+                            <button type="button" class="nh-btn nh-btn-secondary" id="nh-settings-import">${t('btn_import')}</button>
+                            <button type="button" class="nh-btn nh-btn-secondary" id="nh-settings-reset">${t('btn_reset')}</button>
+                        </div>
+                        <input type="file" id="nh-settings-import-file" accept="application/json,.json" hidden>
+                    </div>
+                    <div id="nh-data-message" class="nh-api-key-message" aria-live="polite"></div>
                     <div class="nh-setting-group-title">${t('grp_api_key')}</div>
                     <div class="nh-api-key-card">
                         <div class="nh-setting-content nh-api-key-content">
@@ -4197,12 +4239,113 @@
         };
 
         // Actions
-        document.getElementById('nh-force-update').onclick = () => {
-            if(confirm(t('confirm_update'))) {
-                closeModal();
-                DB.update(true);
-            }
+        const dataMessage = document.getElementById('nh-data-message');
+        const setDataMessage = (message, state = '') => {
+            dataMessage.textContent = message || '';
+            dataMessage.dataset.state = state;
         };
+
+        // 危险操作不弹原生 confirm()：第一次点击显示说明并进入待确认状态，几秒内再点一次才执行。
+        const armConfirm = (button, message, onConfirm) => {
+            const idleHtml = button.innerHTML;
+            let timer = null;
+            button.onclick = () => {
+                if (button.dataset.armed === '1') {
+                    clearTimeout(timer);
+                    onConfirm();
+                    return;
+                }
+                button.dataset.armed = '1';
+                button.textContent = t('btn_confirm_again');
+                setDataMessage(message);
+                timer = setTimeout(() => {
+                    delete button.dataset.armed;
+                    button.innerHTML = idleHtml;
+                    setDataMessage('');
+                }, 5000);
+            };
+        };
+
+        armConfirm(document.getElementById('nh-force-update'), t('confirm_update'), () => {
+            closeModal();
+            DB.update(true);
+        });
+
+        // API Key 属于凭据，不进备份文件，恢复默认时也保留。
+        const SETTINGS_BACKUP_EXCLUDED_KEYS = ['apiKey', 'apiKeyTestStatus', 'apiKeyTestedAt'];
+        const SETTINGS_BACKUP_APP_ID = 'nhentai-pro';
+
+        document.getElementById('nh-settings-export').onclick = () => {
+            const settings = { ...Config.settings };
+            SETTINGS_BACKUP_EXCLUDED_KEYS.forEach(key => delete settings[key]);
+            const payload = {
+                app: SETTINGS_BACKUP_APP_ID,
+                version: '2.8.2.18',
+                exportedAt: new Date().toISOString(),
+                settings,
+                readingProgress: ReadingModeStorage.readAll()
+            };
+            const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `nhentai-pro-settings-${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            setDataMessage(t('msg_export_done'), 'success');
+        };
+
+        // 只接受 DEFAULT_CONFIG 里存在且类型一致的键；取值范围由刷新后的 Config.load 统一规整。
+        const pickImportedSettings = (imported) => {
+            const patch = {};
+            Object.keys(DEFAULT_CONFIG).forEach(key => {
+                if (SETTINGS_BACKUP_EXCLUDED_KEYS.includes(key) || !(key in imported)) return;
+                const value = imported[key];
+                const fallback = DEFAULT_CONFIG[key];
+                if (Array.isArray(fallback) !== Array.isArray(value)) return;
+                if (typeof fallback !== typeof value || value === null) return;
+                patch[key] = value;
+            });
+            return patch;
+        };
+
+        const importFileInput = document.getElementById('nh-settings-import-file');
+        document.getElementById('nh-settings-import').onclick = () => importFileInput.click();
+        importFileInput.onchange = async () => {
+            const file = importFileInput.files?.[0];
+            importFileInput.value = '';
+            if (!file) return;
+            let payload;
+            try {
+                payload = JSON.parse(await file.text());
+            } catch (error) {
+                setDataMessage(t('msg_import_invalid'), 'failure');
+                return;
+            }
+            if (payload?.app !== SETTINGS_BACKUP_APP_ID || !payload.settings || typeof payload.settings !== 'object') {
+                setDataMessage(t('msg_import_invalid'), 'failure');
+                return;
+            }
+            const patch = pickImportedSettings(payload.settings);
+            Config.setMany(patch);
+            ReadingModeStorage.merge(payload.readingProgress);
+            if (patch.enableMetaPersistentCache === false) await GalleryMetaStore.clear();
+            location.reload();
+        };
+
+        armConfirm(document.getElementById('nh-settings-reset'), t('confirm_reset'), async () => {
+            const preserved = { settingsLanguage: Config.get('settingsLanguage') };
+            SETTINGS_BACKUP_EXCLUDED_KEYS.forEach(key => { preserved[key] = Config.get(key); });
+            Config.settings = {
+                ...DEFAULT_CONFIG,
+                quickTagsSettings: { ...DEFAULT_CONFIG.quickTagsSettings },
+                langFilter: [],
+                ...preserved
+            };
+            Config.save();
+            location.reload();
+        });
 
         const apiKeyInput = document.getElementById('cfg-api-key');
         const apiKeyState = document.getElementById('cfg-api-key-state');
@@ -4849,8 +4992,14 @@
     let searchUiActiveQuickTags = null;
     let searchUiActiveSuggestionHost = null;
 
+    const SEARCH_SUGGESTION_ITEM_ID_PREFIX = 'nh-helper-suggestion-';
+
     function clearSearchSuggestionBox() {
         document.querySelectorAll('.nh-helper-suggestion-box').forEach(box => box.remove());
+        // 只清理本脚本设置的 aria-activedescendant，不动官方联想自己的属性。
+        if (searchUiActiveInput?.getAttribute('aria-activedescendant')?.startsWith(SEARCH_SUGGESTION_ITEM_ID_PREFIX)) {
+            searchUiActiveInput.removeAttribute('aria-activedescendant');
+        }
         document.querySelectorAll('.nh-helper-cn-suggestion-active').forEach(el => el.classList.remove('nh-helper-cn-suggestion-active'));
     }
 
@@ -5062,9 +5211,11 @@
             }
             form.classList.remove('nh-helper-cn-suggestion-active');
             const searchToken = ++activeSearchToken;
-            const query = input.value;
+            const fullValue = input.value;
+            // 只对光标之前的内容做联想，在已有查询中间编辑时也能命中正在输入的词。
+            const query = fullValue.slice(0, getInputCaret());
             const suggestions = await DB.search(query);
-            if (searchToken !== activeSearchToken || input.value !== query) return;
+            if (searchToken !== activeSearchToken || input.value !== fullValue) return;
             const helperState = resolveHelperSuggestions(form, suggestions);
             lastSuggestions = helperState.items;
             clearSearchSuggestionBox();
@@ -5072,10 +5223,14 @@
             form.classList.toggle('nh-helper-cn-suggestion-active', helperState.suppressOfficial);
             const box = document.createElement('div');
             box.className = 'nh-helper-suggestion-box';
+            box.setAttribute('role', 'listbox');
             // 默认不预选：Enter 直接搜索，方向键选中后 Enter 才填入。
-            lastSuggestions.forEach(item => {
+            lastSuggestions.forEach((item, index) => {
                 const div = document.createElement('div');
                 div.className = 'nh-helper-suggestion-item';
+                div.id = `${SEARCH_SUGGESTION_ITEM_ID_PREFIX}${index}`;
+                div.setAttribute('role', 'option');
+                div.setAttribute('aria-selected', 'false');
                 div.innerHTML = item.display;
                 div.onmousedown = (e) => e.preventDefault();
                 div.onclick = (e) => applySuggestion(item, e);
@@ -5086,16 +5241,30 @@
             searchUiActiveSuggestionHost = input.parentNode;
         }, 200);
 
+        // 光标位置；有选区时取选区末尾。部分输入类型不支持 selection，退回到末尾。
+        function getInputCaret() {
+            const length = input.value.length;
+            const caret = Number(input.selectionEnd);
+            return Number.isFinite(caret) ? Math.max(0, Math.min(length, caret)) : length;
+        }
+
+        // 只替换光标之前、离光标最近的那一处匹配，光标之后的内容原样保留。
         function applySuggestion(suggestionItem, event) {
             const raw = input.value;
+            const caret = getInputCaret();
+            const head = raw.slice(0, caret);
+            const tail = raw.slice(caret).replace(/^\s+/, '');
             const matchStr = suggestionItem.originalMatch;
-            const lastIndex = raw.lastIndexOf(matchStr);
+            const lastIndex = head.lastIndexOf(matchStr);
             let finalValue = suggestionItem.finalValue;
             if (event && event.shiftKey && !finalValue.startsWith('-')) finalValue = '-' + finalValue;
-            if (lastIndex !== -1) input.value = raw.substring(0, lastIndex) + finalValue + ' ';
-            else input.value = raw + (raw.endsWith(' ') ? '' : ' ') + finalValue + ' ';
+            const nextHead = lastIndex !== -1
+                ? head.substring(0, lastIndex) + finalValue + ' '
+                : head + (!head || head.endsWith(' ') ? '' : ' ') + finalValue + ' ';
+            input.value = nextHead + tail;
             clearSearchSuggestionBox();
             input.focus();
+            input.setSelectionRange(nextHead.length, nextHead.length);
         }
         input.addEventListener('input', handleInput);
         const clearLoadingWatcher = () => {
@@ -5161,13 +5330,18 @@
             let activeIdx = Array.from(items).findIndex(el => el.classList.contains('active'));
             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();
-                if (activeIdx > -1) items[activeIdx].classList.remove('active');
+                if (activeIdx > -1) {
+                    items[activeIdx].classList.remove('active');
+                    items[activeIdx].setAttribute('aria-selected', 'false');
+                }
                 if (e.key === 'ArrowDown') {
                     activeIdx = (activeIdx + 1) % items.length;
                 } else {
                     activeIdx = activeIdx <= 0 ? items.length - 1 : activeIdx - 1;
                 }
                 items[activeIdx].classList.add('active');
+                items[activeIdx].setAttribute('aria-selected', 'true');
+                input.setAttribute('aria-activedescendant', items[activeIdx].id);
                 items[activeIdx].scrollIntoView({
                     block: 'nearest'
                 });
@@ -8650,12 +8824,33 @@
                 updatedAt: Date.now()
             };
 
-            const trimmed = Object.fromEntries(
+            this.writeAll(this.trim(all));
+        },
+
+        // 只保留最近更新的 200 本。
+        trim(all) {
+            return Object.fromEntries(
                 Object.entries(all)
                     .sort((a, b) => (Number(b[1]?.updatedAt) || 0) - (Number(a[1]?.updatedAt) || 0))
                     .slice(0, 200)
             );
-            this.writeAll(trimmed);
+        },
+
+        // 导入备份：同一本取更新时间较新的一条，格式不对的条目丢弃。
+        merge(records) {
+            if (!records || typeof records !== 'object') return 0;
+            const all = this.readAll();
+            let merged = 0;
+            Object.entries(records).forEach(([galleryId, record]) => {
+                const page = Number(record?.page);
+                if (!/^\d+$/.test(galleryId) || !Number.isFinite(page) || page < 1) return;
+                const updatedAt = Number(record.updatedAt) || 0;
+                if ((Number(all[galleryId]?.updatedAt) || 0) > updatedAt) return;
+                all[galleryId] = { page, total: Number(record.total) || 0, updatedAt };
+                merged += 1;
+            });
+            this.writeAll(this.trim(all));
+            return merged;
         }
     };
 

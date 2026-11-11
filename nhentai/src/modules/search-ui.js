@@ -4,8 +4,14 @@
     let searchUiActiveQuickTags = null;
     let searchUiActiveSuggestionHost = null;
 
+    const SEARCH_SUGGESTION_ITEM_ID_PREFIX = 'nh-helper-suggestion-';
+
     function clearSearchSuggestionBox() {
         document.querySelectorAll('.nh-helper-suggestion-box').forEach(box => box.remove());
+        // 只清理本脚本设置的 aria-activedescendant，不动官方联想自己的属性。
+        if (searchUiActiveInput?.getAttribute('aria-activedescendant')?.startsWith(SEARCH_SUGGESTION_ITEM_ID_PREFIX)) {
+            searchUiActiveInput.removeAttribute('aria-activedescendant');
+        }
         document.querySelectorAll('.nh-helper-cn-suggestion-active').forEach(el => el.classList.remove('nh-helper-cn-suggestion-active'));
     }
 
@@ -217,9 +223,11 @@
             }
             form.classList.remove('nh-helper-cn-suggestion-active');
             const searchToken = ++activeSearchToken;
-            const query = input.value;
+            const fullValue = input.value;
+            // 只对光标之前的内容做联想，在已有查询中间编辑时也能命中正在输入的词。
+            const query = fullValue.slice(0, getInputCaret());
             const suggestions = await DB.search(query);
-            if (searchToken !== activeSearchToken || input.value !== query) return;
+            if (searchToken !== activeSearchToken || input.value !== fullValue) return;
             const helperState = resolveHelperSuggestions(form, suggestions);
             lastSuggestions = helperState.items;
             clearSearchSuggestionBox();
@@ -227,10 +235,14 @@
             form.classList.toggle('nh-helper-cn-suggestion-active', helperState.suppressOfficial);
             const box = document.createElement('div');
             box.className = 'nh-helper-suggestion-box';
+            box.setAttribute('role', 'listbox');
             // 默认不预选：Enter 直接搜索，方向键选中后 Enter 才填入。
-            lastSuggestions.forEach(item => {
+            lastSuggestions.forEach((item, index) => {
                 const div = document.createElement('div');
                 div.className = 'nh-helper-suggestion-item';
+                div.id = `${SEARCH_SUGGESTION_ITEM_ID_PREFIX}${index}`;
+                div.setAttribute('role', 'option');
+                div.setAttribute('aria-selected', 'false');
                 div.innerHTML = item.display;
                 div.onmousedown = (e) => e.preventDefault();
                 div.onclick = (e) => applySuggestion(item, e);
@@ -241,16 +253,30 @@
             searchUiActiveSuggestionHost = input.parentNode;
         }, 200);
 
+        // 光标位置；有选区时取选区末尾。部分输入类型不支持 selection，退回到末尾。
+        function getInputCaret() {
+            const length = input.value.length;
+            const caret = Number(input.selectionEnd);
+            return Number.isFinite(caret) ? Math.max(0, Math.min(length, caret)) : length;
+        }
+
+        // 只替换光标之前、离光标最近的那一处匹配，光标之后的内容原样保留。
         function applySuggestion(suggestionItem, event) {
             const raw = input.value;
+            const caret = getInputCaret();
+            const head = raw.slice(0, caret);
+            const tail = raw.slice(caret).replace(/^\s+/, '');
             const matchStr = suggestionItem.originalMatch;
-            const lastIndex = raw.lastIndexOf(matchStr);
+            const lastIndex = head.lastIndexOf(matchStr);
             let finalValue = suggestionItem.finalValue;
             if (event && event.shiftKey && !finalValue.startsWith('-')) finalValue = '-' + finalValue;
-            if (lastIndex !== -1) input.value = raw.substring(0, lastIndex) + finalValue + ' ';
-            else input.value = raw + (raw.endsWith(' ') ? '' : ' ') + finalValue + ' ';
+            const nextHead = lastIndex !== -1
+                ? head.substring(0, lastIndex) + finalValue + ' '
+                : head + (!head || head.endsWith(' ') ? '' : ' ') + finalValue + ' ';
+            input.value = nextHead + tail;
             clearSearchSuggestionBox();
             input.focus();
+            input.setSelectionRange(nextHead.length, nextHead.length);
         }
         input.addEventListener('input', handleInput);
         const clearLoadingWatcher = () => {
@@ -316,13 +342,18 @@
             let activeIdx = Array.from(items).findIndex(el => el.classList.contains('active'));
             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                 e.preventDefault();
-                if (activeIdx > -1) items[activeIdx].classList.remove('active');
+                if (activeIdx > -1) {
+                    items[activeIdx].classList.remove('active');
+                    items[activeIdx].setAttribute('aria-selected', 'false');
+                }
                 if (e.key === 'ArrowDown') {
                     activeIdx = (activeIdx + 1) % items.length;
                 } else {
                     activeIdx = activeIdx <= 0 ? items.length - 1 : activeIdx - 1;
                 }
                 items[activeIdx].classList.add('active');
+                items[activeIdx].setAttribute('aria-selected', 'true');
+                input.setAttribute('aria-activedescendant', items[activeIdx].id);
                 items[activeIdx].scrollIntoView({
                     block: 'nearest'
                 });

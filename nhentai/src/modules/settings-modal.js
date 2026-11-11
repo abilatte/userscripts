@@ -312,8 +312,19 @@
                         <label class="nh-switch"><input type="checkbox" id="cfg-meta-cache" ${config.metaCache ? 'checked' : ''}><span class="nh-slider"></span></label>
                     </div>
                     <div class="nh-force-update-wrap">
-                        <button class="nh-btn nh-btn-secondary nh-btn-block" id="nh-force-update"><i class="fa fa-refresh"></i> ${t('btn_update')}</button>
+                        <button type="button" class="nh-btn nh-btn-secondary nh-btn-block" id="nh-force-update"><i class="fa fa-refresh"></i> ${t('btn_update')}</button>
                     </div>
+                    <div class="nh-setting-group-title">${t('grp_backup')}</div>
+                    <div class="nh-api-key-card">
+                        <div class="nh-info-text">${t('desc_backup')}</div>
+                        <div class="nh-api-key-actions">
+                            <button type="button" class="nh-btn nh-btn-secondary" id="nh-settings-export">${t('btn_export')}</button>
+                            <button type="button" class="nh-btn nh-btn-secondary" id="nh-settings-import">${t('btn_import')}</button>
+                            <button type="button" class="nh-btn nh-btn-secondary" id="nh-settings-reset">${t('btn_reset')}</button>
+                        </div>
+                        <input type="file" id="nh-settings-import-file" accept="application/json,.json" hidden>
+                    </div>
+                    <div id="nh-data-message" class="nh-api-key-message" aria-live="polite"></div>
                     <div class="nh-setting-group-title">${t('grp_api_key')}</div>
                     <div class="nh-api-key-card">
                         <div class="nh-setting-content nh-api-key-content">
@@ -430,12 +441,113 @@
         };
 
         // Actions
-        document.getElementById('nh-force-update').onclick = () => {
-            if(confirm(t('confirm_update'))) {
-                closeModal();
-                DB.update(true);
-            }
+        const dataMessage = document.getElementById('nh-data-message');
+        const setDataMessage = (message, state = '') => {
+            dataMessage.textContent = message || '';
+            dataMessage.dataset.state = state;
         };
+
+        // 危险操作不弹原生 confirm()：第一次点击显示说明并进入待确认状态，几秒内再点一次才执行。
+        const armConfirm = (button, message, onConfirm) => {
+            const idleHtml = button.innerHTML;
+            let timer = null;
+            button.onclick = () => {
+                if (button.dataset.armed === '1') {
+                    clearTimeout(timer);
+                    onConfirm();
+                    return;
+                }
+                button.dataset.armed = '1';
+                button.textContent = t('btn_confirm_again');
+                setDataMessage(message);
+                timer = setTimeout(() => {
+                    delete button.dataset.armed;
+                    button.innerHTML = idleHtml;
+                    setDataMessage('');
+                }, 5000);
+            };
+        };
+
+        armConfirm(document.getElementById('nh-force-update'), t('confirm_update'), () => {
+            closeModal();
+            DB.update(true);
+        });
+
+        // API Key 属于凭据，不进备份文件，恢复默认时也保留。
+        const SETTINGS_BACKUP_EXCLUDED_KEYS = ['apiKey', 'apiKeyTestStatus', 'apiKeyTestedAt'];
+        const SETTINGS_BACKUP_APP_ID = 'nhentai-pro';
+
+        document.getElementById('nh-settings-export').onclick = () => {
+            const settings = { ...Config.settings };
+            SETTINGS_BACKUP_EXCLUDED_KEYS.forEach(key => delete settings[key]);
+            const payload = {
+                app: SETTINGS_BACKUP_APP_ID,
+                version: '__NH_VERSION__',
+                exportedAt: new Date().toISOString(),
+                settings,
+                readingProgress: ReadingModeStorage.readAll()
+            };
+            const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `nhentai-pro-settings-${new Date().toISOString().slice(0, 10)}.json`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            setDataMessage(t('msg_export_done'), 'success');
+        };
+
+        // 只接受 DEFAULT_CONFIG 里存在且类型一致的键；取值范围由刷新后的 Config.load 统一规整。
+        const pickImportedSettings = (imported) => {
+            const patch = {};
+            Object.keys(DEFAULT_CONFIG).forEach(key => {
+                if (SETTINGS_BACKUP_EXCLUDED_KEYS.includes(key) || !(key in imported)) return;
+                const value = imported[key];
+                const fallback = DEFAULT_CONFIG[key];
+                if (Array.isArray(fallback) !== Array.isArray(value)) return;
+                if (typeof fallback !== typeof value || value === null) return;
+                patch[key] = value;
+            });
+            return patch;
+        };
+
+        const importFileInput = document.getElementById('nh-settings-import-file');
+        document.getElementById('nh-settings-import').onclick = () => importFileInput.click();
+        importFileInput.onchange = async () => {
+            const file = importFileInput.files?.[0];
+            importFileInput.value = '';
+            if (!file) return;
+            let payload;
+            try {
+                payload = JSON.parse(await file.text());
+            } catch (error) {
+                setDataMessage(t('msg_import_invalid'), 'failure');
+                return;
+            }
+            if (payload?.app !== SETTINGS_BACKUP_APP_ID || !payload.settings || typeof payload.settings !== 'object') {
+                setDataMessage(t('msg_import_invalid'), 'failure');
+                return;
+            }
+            const patch = pickImportedSettings(payload.settings);
+            Config.setMany(patch);
+            ReadingModeStorage.merge(payload.readingProgress);
+            if (patch.enableMetaPersistentCache === false) await GalleryMetaStore.clear();
+            location.reload();
+        };
+
+        armConfirm(document.getElementById('nh-settings-reset'), t('confirm_reset'), async () => {
+            const preserved = { settingsLanguage: Config.get('settingsLanguage') };
+            SETTINGS_BACKUP_EXCLUDED_KEYS.forEach(key => { preserved[key] = Config.get(key); });
+            Config.settings = {
+                ...DEFAULT_CONFIG,
+                quickTagsSettings: { ...DEFAULT_CONFIG.quickTagsSettings },
+                langFilter: [],
+                ...preserved
+            };
+            Config.save();
+            location.reload();
+        });
 
         const apiKeyInput = document.getElementById('cfg-api-key');
         const apiKeyState = document.getElementById('cfg-api-key-state');

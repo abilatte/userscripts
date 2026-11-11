@@ -40,12 +40,33 @@
                 updatedAt: Date.now()
             };
 
-            const trimmed = Object.fromEntries(
+            this.writeAll(this.trim(all));
+        },
+
+        // 只保留最近更新的 200 本。
+        trim(all) {
+            return Object.fromEntries(
                 Object.entries(all)
                     .sort((a, b) => (Number(b[1]?.updatedAt) || 0) - (Number(a[1]?.updatedAt) || 0))
                     .slice(0, 200)
             );
-            this.writeAll(trimmed);
+        },
+
+        // 导入备份：同一本取更新时间较新的一条，格式不对的条目丢弃。
+        merge(records) {
+            if (!records || typeof records !== 'object') return 0;
+            const all = this.readAll();
+            let merged = 0;
+            Object.entries(records).forEach(([galleryId, record]) => {
+                const page = Number(record?.page);
+                if (!/^\d+$/.test(galleryId) || !Number.isFinite(page) || page < 1) return;
+                const updatedAt = Number(record.updatedAt) || 0;
+                if ((Number(all[galleryId]?.updatedAt) || 0) > updatedAt) return;
+                all[galleryId] = { page, total: Number(record.total) || 0, updatedAt };
+                merged += 1;
+            });
+            this.writeAll(this.trim(all));
+            return merged;
         }
     };
 

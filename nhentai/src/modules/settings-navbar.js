@@ -102,6 +102,18 @@
             "btn_cancel": "取消",
             "btn_save": "保存设置",
             "confirm_update": "确定要从 EhTagTranslation 重新下载汉化词库吗？将直接拉取社区维护的最新数据。",
+            "btn_confirm_again": "再次点击确认",
+            "grp_backup": "备份与重置",
+            "desc_backup": "导出文件包含全部设置和阅读进度，不含 API Key。导入会覆盖当前设置并合并阅读进度。",
+            "btn_export": "导出设置",
+            "btn_import": "导入设置",
+            "btn_reset": "恢复默认",
+            "confirm_reset": "将把所有设置恢复为默认值（保留 API Key 和阅读进度），页面会刷新。",
+            "msg_export_done": "已导出设置文件",
+            "msg_import_invalid": "导入失败：不是有效的 nHentai Pro 设置文件",
+            "menu_force_update": "强制更新汉化数据库",
+            "menu_toggle_settings_button": "显示/隐藏网页设置按钮",
+            "menu_open_settings": "打开助手设置",
             "qt_parodies": "原作",
             "qt_characters": "角色",
             "qt_tags": "标签",
@@ -256,6 +268,18 @@
             "btn_cancel": "Cancel",
             "btn_save": "Save Settings",
             "confirm_update": "Redownload translation database from EhTagTranslation?",
+            "btn_confirm_again": "Click again to confirm",
+            "grp_backup": "Backup & Reset",
+            "desc_backup": "The export includes all settings and reading progress, but not the API key. Importing overwrites current settings and merges reading progress.",
+            "btn_export": "Export Settings",
+            "btn_import": "Import Settings",
+            "btn_reset": "Restore Defaults",
+            "confirm_reset": "All settings will be restored to defaults (API key and reading progress are kept). The page will reload.",
+            "msg_export_done": "Settings file exported",
+            "msg_import_invalid": "Import failed: not a valid nHentai Pro settings file",
+            "menu_force_update": "Force update translation database",
+            "menu_toggle_settings_button": "Show/hide the on-page settings button",
+            "menu_open_settings": "Open settings",
             "qt_parodies": "Parodies",
             "qt_characters": "Characters",
             "qt_tags": "Tags",
@@ -320,13 +344,13 @@
     }
 
     function setupSettingsUI() {
-        GM_registerMenuCommand("显示/隐藏网页设置按钮", () => {
+        GM_registerMenuCommand(getUIText('menu_toggle_settings_button'), () => {
             const current = Config.get('showPageSettingsButton');
             Config.set('showPageSettingsButton', !current);
             updatePageSettingsButton();
         });
         // 菜单回调会收到事件参数，不能直接当作 showSettingsModal 的选项传入。
-        GM_registerMenuCommand("打开助手设置", () => showSettingsModal());
+        GM_registerMenuCommand(getUIText('menu_open_settings'), () => showSettingsModal());
     }
 
     function updatePageSettingsButton() {
