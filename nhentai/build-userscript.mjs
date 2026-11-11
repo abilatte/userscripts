@@ -43,10 +43,20 @@ function readSourceFile(relativePath) {
   return fs.readFileSync(absolutePath, 'utf8').replace(/\r\n/g, '\n');
 }
 
+// 版本号只在 header.js 的 @version 维护；其余源码用 __NH_VERSION__ 占位，构建时统一注入。
+const VERSION_TOKEN = '__NH_VERSION__';
+const versionMatch = readSourceFile('src/entry/header.js').match(/^\/\/ @version\s+([0-9.]+)\s*$/m);
+if (!versionMatch) {
+  throw new Error('[build-userscript] 无法从 src/entry/header.js 解析 @version');
+}
+const version = versionMatch[1];
+
 const output = sourceFiles
   .map(readSourceFile)
   .join('\n')
-  .replace(/\n{3,}/g, '\n\n');
+  .replace(/\n{3,}/g, '\n\n')
+  .split(VERSION_TOKEN)
+  .join(version);
 
 fs.writeFileSync(path.join(rootDir, outputFile), output, 'utf8');
-console.log(`[build-userscript] 已生成 ${outputFile}`);
+console.log(`[build-userscript] 已生成 ${outputFile}（v${version}）`);

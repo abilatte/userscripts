@@ -3,7 +3,7 @@
 // @name:en nhentai Pro
 // @namespace https://github.com/abilatte
 // @homepageURL https://github.com/abilatte/userscripts
-// @version 2.8.2.17
+// @version 2.8.2.18
 // @description 中文搜索标签、全站标签汉化、封面悬停预览、卷轴阅读、无限滚动与语言筛选
 // @description:en Chinese tag search, site-wide tag translation, cover hover preview, scroll reader, infinite scroll and language filter.
 // @author abilatte

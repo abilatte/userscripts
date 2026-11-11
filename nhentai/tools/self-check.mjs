@@ -79,9 +79,13 @@ const agentsPath = path.join(rootDir, 'AGENTS.md');
 const agentsDoc = fs.existsSync(agentsPath) ? fs.readFileSync(agentsPath, 'utf8') : '';
 
 const headerVersion = extractVersion(header, /@version\s+([0-9.]+)/, 'header 版本号', failures);
-const zhTitleVersion = extractVersion(settingsNavbar, /"title": "nHentai Pro .*? v([0-9.]+)"/, '设置标题中文版本号', failures);
-const enTitleVersion = extractVersion(settingsNavbar, /"title": "nHentai Pro Settings v([0-9.]+)"/, '设置标题英文版本号', failures);
-const panelVersion = extractVersion(settingsModal, /<span class="version">v([0-9.]+)<\/span>/, '设置面板角标版本号', failures);
+// 设置标题与面板角标在源码中只写占位符，由构建注入 header 的 @version。
+const VERSION_TOKEN = '__NH_VERSION__';
+const versionPlaceholders = [
+  ['设置标题（中文）', settingsNavbar, `"title": "nHentai Pro 设置 v${VERSION_TOKEN}"`],
+  ['设置标题（英文）', settingsNavbar, `"title": "nHentai Pro Settings v${VERSION_TOKEN}"`],
+  ['设置面板角标', settingsModal, `<span class="version">v${VERSION_TOKEN}</span>`]
+];
 // 产物文件名固定、不带版本号：GitHub raw 的 @updateURL 依赖稳定路径
 const expectedMainScript = 'nhentai-pro.user.js';
 const buildOutputMatch = buildScript.match(/const outputFile = '([^']+)';/);
@@ -156,9 +160,6 @@ if (headerUpdateUrlCount === 2) {
 
 const versions = [
   ['header', headerVersion],
-  ['settings.zh', zhTitleVersion],
-  ['settings.en', enTitleVersion],
-  ['panel', panelVersion],
   ['readme.badge', readmeBadgeVersion]
 ];
 if (agentsDoc) {
@@ -172,8 +173,29 @@ if (uniqueVersions.length === 1 && uniqueVersions[0] === headerVersion) {
   fail(`版本不一致：${versions.map(([name, version]) => `${name}=${version || 'N/A'}`).join(', ')}`, failures);
 }
 
+versionPlaceholders.forEach(([label, source, expected]) => {
+  if (source.includes(expected)) {
+    pass(`${label} 使用版本占位符`);
+  } else {
+    fail(`${label} 未使用 ${VERSION_TOKEN} 占位符`, failures);
+  }
+});
+
 if (runBuild) {
   await runBuildCheck(failures);
+}
+
+const builtScript = fs.existsSync(path.join(rootDir, expectedMainScript)) ? readFile(expectedMainScript) : '';
+if (builtScript.includes(VERSION_TOKEN)) {
+  fail(`产物中残留未替换的 ${VERSION_TOKEN}`, failures);
+} else if (
+  builtScript.includes(`// @version ${headerVersion}`)
+  && builtScript.includes(`nHentai Pro 设置 v${headerVersion}`)
+  && builtScript.includes(`<span class="version">v${headerVersion}</span>`)
+) {
+  pass(`产物已注入版本号 ${headerVersion}`);
+} else {
+  fail(`产物中的版本号与 header 不一致（应为 ${headerVersion}）`, failures);
 }
 
 runSyntaxCheck(expectedMainScript, failures, `语法检查 ${expectedMainScript}`);

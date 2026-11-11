@@ -3,7 +3,7 @@
 // @name:en nhentai Pro
 // @namespace https://github.com/abilatte
 // @homepageURL https://github.com/abilatte/userscripts
-// @version 2.8.2.17
+// @version 2.8.2.18
 // @description 中文搜索标签、全站标签汉化、封面悬停预览、卷轴阅读、无限滚动与语言筛选
 // @description:en Chinese tag search, site-wide tag translation, cover hover preview, scroll reader, infinite scroll and language filter.
 // @author abilatte
@@ -3233,7 +3233,7 @@
     // ===== 5. 搜索、翻译、语言筛选、设置 UI =====
     const SettingsUIDict = {
         'zh': {
-            "title": "nHentai Pro 设置 v2.8.2.17",
+            "title": "nHentai Pro 设置 v2.8.2.18",
             "tab_browse": "浏览",
             "tab_translate": "翻译",
             "tab_search": "搜索与筛选",
@@ -3383,7 +3383,7 @@
             "db_status_failed": "更新失败"
         },
         'en': {
-            "title": "nHentai Pro Settings v2.8.2.17",
+            "title": "nHentai Pro Settings v2.8.2.18",
             "tab_browse": "Browse",
             "tab_translate": "Translate",
             "tab_search": "Search",
@@ -3782,7 +3782,7 @@
                 </div>
                 <div class="nh-modal-tools">
                     <button type="button" id="nh-lang-switch" class="nh-btn nh-btn-secondary nh-lang-switch-btn">${lang === 'zh' ? 'English' : '中文'}</button>
-                    <span class="version">v2.8.2.17</span>
+                    <span class="version">v2.8.2.18</span>
                 </div>
             </div>
 

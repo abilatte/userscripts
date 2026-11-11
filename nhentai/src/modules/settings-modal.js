@@ -78,7 +78,7 @@
                 </div>
                 <div class="nh-modal-tools">
                     <button type="button" id="nh-lang-switch" class="nh-btn nh-btn-secondary nh-lang-switch-btn">${lang === 'zh' ? 'English' : '中文'}</button>
-                    <span class="version">v2.8.2.17</span>
+                    <span class="version">v__NH_VERSION__</span>
                 </div>
             </div>
 
