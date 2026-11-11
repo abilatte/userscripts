@@ -112,6 +112,8 @@
         enableReadingMode: true,
         readingModeImageScalePercent: 100,
         readingModeImageGap: 10,
+        readingModeFitMode: 'width',
+        readingModeAutoScrollSpeed: 80,
         enableInfiniteScroll: true,
         enableFullBlacklistHide: true,
         enableDetailQuickBlacklist: true,
@@ -222,6 +224,13 @@
             if (!Number.isFinite(Number(this.settings.readingModeImageGap))) {
                 this.settings.readingModeImageGap = 10;
             }
+            if (!['width', 'height'].includes(this.settings.readingModeFitMode)) {
+                this.settings.readingModeFitMode = DEFAULT_CONFIG.readingModeFitMode;
+            }
+            const autoScrollSpeed = Number(this.settings.readingModeAutoScrollSpeed);
+            this.settings.readingModeAutoScrollSpeed = Number.isFinite(autoScrollSpeed)
+                ? Math.max(10, Math.min(600, Math.round(autoScrollSpeed)))
+                : DEFAULT_CONFIG.readingModeAutoScrollSpeed;
             if (shouldAutoTuneReadingModeLayout) {
                 this.settings.readingModeImageScalePercent = 100;
                 this.settings.readingModeImageGap = 10;

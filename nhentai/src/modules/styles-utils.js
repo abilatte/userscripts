@@ -654,6 +654,8 @@
             display: none !important;
         }
         .nh-page-number { position: absolute; top: 5px; right: 5px; background-color: rgba(0,0,0,0.6); color: #fff; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold; z-index: 10; pointer-events: none; }
+        .nh-read-progress { position: absolute; top: 28px; right: 5px; background-color: rgba(237, 37, 83, 0.88); color: #fff; padding: 2px 6px; border-radius: 3px; font-size: 11px; font-weight: bold; z-index: 10; pointer-events: none; }
+        .nh-read-progress.is-finished { background-color: rgba(70, 70, 70, 0.88); }
         .nh-scroll-page-marker {
             width: fit-content;
             min-width: 96px;
@@ -910,6 +912,37 @@
             background: rgba(255,255,255,0.10);
             border-color: rgba(255,255,255,0.18);
             transform: translateY(-1px);
+        }
+        .nh-reading-action {
+            padding: 6px 11px;
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 999px;
+            background: rgba(18,18,18,0.72);
+            color: #fff;
+            cursor: pointer;
+            font-size: 11px;
+            line-height: 1;
+            backdrop-filter: blur(8px);
+            transition: background-color 0.15s ease, border-color 0.15s ease;
+        }
+        .nh-reading-action:hover {
+            background: rgba(255,255,255,0.10);
+            border-color: rgba(255,255,255,0.18);
+        }
+        .nh-reading-action.is-active {
+            background: rgba(237, 37, 83, 0.78);
+            border-color: rgba(237, 37, 83, 0.9);
+        }
+        #nh-reading-overlay[data-fit="height"] .nh-reading-page img {
+            width: auto;
+            max-width: 100%;
+            height: 100vh;
+            min-height: 0;
+            object-fit: contain;
+        }
+        @media (max-width: 520px) {
+            .nh-reading-action { padding: 6px 8px; }
+            .nh-reading-meta { max-width: 34vw; }
         }
         .nh-reading-scroller {
             height: 100%;

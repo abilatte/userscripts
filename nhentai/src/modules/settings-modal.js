@@ -41,6 +41,8 @@
             readingMode: pick('enableReadingMode'),
             readingModeWidth: pick('readingModeImageScalePercent'),
             readingModeGap: pick('readingModeImageGap'),
+            readingModeFit: pick('readingModeFitMode'),
+            readingModeAutoScrollSpeed: pick('readingModeAutoScrollSpeed'),
             infinite: pick('enableInfiniteScroll'),
             blacklistHide: pick('enableFullBlacklistHide'),
             quickBlacklist: pick('enableDetailQuickBlacklist'),
@@ -175,6 +177,28 @@
                         <div class="nh-setting-control">
                             <input type="number" id="cfg-reading-mode-gap" class="nh-number-input" min="0" max="80" step="2" value="${config.readingModeGap}">
                             <span class="nh-setting-unit">px</span>
+                        </div>
+                    </div>
+                    <div class="nh-setting-item">
+                        <div class="nh-setting-content">
+                            <span class="nh-setting-label">${t('lbl_reading_mode_fit')}</span>
+                            <div class="nh-info-text">${t('desc_reading_mode_fit')}</div>
+                        </div>
+                        <div class="nh-setting-control nh-setting-control-select">
+                            <select id="cfg-reading-mode-fit" class="nh-select">
+                                <option value="width" ${config.readingModeFit === 'width' ? 'selected' : ''}>${t('opt_reading_fit_width')}</option>
+                                <option value="height" ${config.readingModeFit === 'height' ? 'selected' : ''}>${t('opt_reading_fit_height')}</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="nh-setting-item">
+                        <div class="nh-setting-content">
+                            <span class="nh-setting-label">${t('lbl_reading_mode_autoscroll_speed')}</span>
+                            <div class="nh-info-text">${t('desc_reading_mode_autoscroll_speed')}</div>
+                        </div>
+                        <div class="nh-setting-control">
+                            <input type="number" id="cfg-reading-mode-autoscroll-speed" class="nh-number-input" min="10" max="600" step="10" value="${config.readingModeAutoScrollSpeed}">
+                            <span class="nh-setting-unit">px/s</span>
                         </div>
                     </div>
                     <div class="nh-setting-item">
@@ -429,6 +453,8 @@
                 enableReadingMode: document.getElementById('cfg-reading-mode').checked,
                 readingModeImageScalePercent: Math.max(40, Math.min(160, Number(document.getElementById('cfg-reading-mode-width').value) || 100)),
                 readingModeImageGap: Math.max(0, Math.min(80, Number.isFinite(readingGap) ? readingGap : 10)),
+                readingModeFitMode: document.getElementById('cfg-reading-mode-fit').value === 'height' ? 'height' : 'width',
+                readingModeAutoScrollSpeed: Math.max(10, Math.min(600, Math.round(Number(document.getElementById('cfg-reading-mode-autoscroll-speed').value) || 80))),
                 enableInfiniteScroll: document.getElementById('cfg-infinite-scroll').checked,
                 enableFullBlacklistHide: document.getElementById('cfg-blacklist-hide').checked,
                 enableDetailQuickBlacklist: document.getElementById('cfg-detail-quick-blacklist').checked,

@@ -70,6 +70,38 @@
         }
     };
 
+    // 列表封面上的阅读进度角标：与详情页按钮一致，读到第 2 页及以后才显示。
+    function applyReadingProgressBadges(galleries) {
+        if (!galleries.length) return;
+        const all = ReadingMode.isEnabled() ? ReadingModeStorage.readAll() : {};
+        galleries.forEach(gallery => {
+            const cover = gallery.querySelector(GALLERY_SELECTORS.coverLink);
+            if (!cover) return;
+            const id = (cover.getAttribute('href') || '').match(/\/g\/(\d+)\//)?.[1];
+            const record = id ? all[id] : null;
+            const page = Number(record?.page) || 0;
+            let badge = cover.querySelector('.nh-read-progress');
+            if (page <= 1) {
+                badge?.remove();
+                return;
+            }
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'nh-read-progress';
+                if (getComputedStyle(cover).position === 'static') {
+                    cover.style.position = 'relative';
+                }
+                cover.appendChild(badge);
+            }
+            const total = Number(record.total) || 0;
+            const finished = total > 0 && page >= total;
+            badge.classList.toggle('is-finished', finished);
+            badge.textContent = finished
+                ? getUIText('reading_progress_finished')
+                : `${page}${total ? `/${total}` : ''}`;
+        });
+    }
+
     const ReadingMode = {
         overlay: null,
         scrollContainer: null,
@@ -83,7 +115,22 @@
         toolRoot: null,
         toolScaleInputNode: null,
         toolGapInputNode: null,
+        toolPageInputNode: null,
+        toolSpeedInputNode: null,
+        fitButtonNode: null,
+        autoScrollButtonNode: null,
+        fullscreenButtonNode: null,
         toolAutoHideTimer: null,
+        autoScrolling: false,
+        autoScrollFrame: 0,
+        autoScrollCarry: 0,
+        pinchState: null,
+        fullscreenChangeHandler: null,
+        // 打开阅读时压入一条同地址的历史记录，让返回键/返回手势先退出阅读而不是离开详情页。
+        historyEntryActive: false,
+        ignoreNextPopstate: false,
+        ignorePopstateTimer: null,
+        popstateHandler: null,
         lastReaderScrollAt: 0,
         lazyObserver: null,
         pageObserver: null,
@@ -118,6 +165,15 @@
             // 0 是合法间距，不能用 `|| 10` 兜底。
             const gap = Number(Config.get('readingModeImageGap'));
             return Math.max(0, Math.min(80, Number.isFinite(gap) ? gap : 10));
+        },
+
+        getFitMode() {
+            return Config.get('readingModeFitMode') === 'height' ? 'height' : 'width';
+        },
+
+        getAutoScrollSpeed() {
+            const speed = Number(Config.get('readingModeAutoScrollSpeed'));
+            return Math.max(10, Math.min(600, Number.isFinite(speed) ? speed : 80));
         },
 
         getDetailTitle() {
@@ -181,6 +237,10 @@
             if (this.pageStatus) {
                 this.pageStatus.textContent = this.getStatusText();
             }
+            // 正在输入页码时不覆盖输入框。
+            if (this.toolPageInputNode && document.activeElement !== this.toolPageInputNode) {
+                this.toolPageInputNode.value = `${this.currentPage}`;
+            }
             this.updateScrollbarPopper(this.currentPage);
         },
 
@@ -204,6 +264,9 @@
             }
             if (this.toolGapInputNode) {
                 this.toolGapInputNode.value = `${this.getImageGap()}`;
+            }
+            if (this.toolSpeedInputNode) {
+                this.toolSpeedInputNode.value = `${this.getAutoScrollSpeed()}`;
             }
         },
 
@@ -253,6 +316,11 @@
             if (!this.overlay) return;
             this.overlay.style.setProperty('--nh-reading-max-width', `${this.getImageMaxWidth()}px`);
             this.overlay.style.setProperty('--nh-reading-gap', `${this.getImageGap()}px`);
+            this.overlay.dataset.fit = this.getFitMode();
+            if (this.fitButtonNode) {
+                // 按钮显示当前模式。
+                this.fitButtonNode.textContent = getUIText(this.getFitMode() === 'height' ? 'reading_mode_fit_height' : 'reading_mode_fit_width');
+            }
             this.updateToolValues();
             requestAnimationFrame(() => {
                 this.updateScrollbarThumb();
@@ -271,11 +339,173 @@
             this.applyOverlayPreferences();
         },
 
+        toggleFitMode() {
+            const page = this.currentPage;
+            Config.set('readingModeFitMode', this.getFitMode() === 'height' ? 'width' : 'height');
+            this.applyOverlayPreferences();
+            // 切换后各页高度都变了，回到切换前所在的页。
+            requestAnimationFrame(() => this.scrollToPage(page));
+        },
+
+        setAutoScrollSpeed(value) {
+            const speed = Number(value);
+            Config.set('readingModeAutoScrollSpeed', Math.max(10, Math.min(600, Number.isFinite(speed) ? Math.round(speed) : 80)));
+            this.updateToolValues();
+        },
+
+        updateAutoScrollButton() {
+            this.autoScrollButtonNode?.classList.toggle('is-active', this.autoScrolling);
+            this.autoScrollButtonNode?.setAttribute('aria-pressed', this.autoScrolling ? 'true' : 'false');
+        },
+
+        startAutoScroll() {
+            if (this.autoScrolling || !this.scrollContainer) return;
+            this.autoScrolling = true;
+            this.autoScrollCarry = 0;
+            this.hideTools({ force: true });
+            this.updateAutoScrollButton();
+            let lastTimestamp = 0;
+            const step = (timestamp) => {
+                const scroller = this.scrollContainer;
+                if (!this.autoScrolling || !scroller) return;
+                if (lastTimestamp) {
+                    // 标签页切到后台再回来时 dt 会很大，限制单帧位移。
+                    const elapsed = Math.min(100, timestamp - lastTimestamp);
+                    this.autoScrollCarry += (this.getAutoScrollSpeed() * elapsed) / 1000;
+                    const distance = Math.trunc(this.autoScrollCarry);
+                    if (distance > 0) {
+                        this.autoScrollCarry -= distance;
+                        scroller.scrollTop += distance;
+                    }
+                    if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1) {
+                        this.stopAutoScroll();
+                        return;
+                    }
+                }
+                lastTimestamp = timestamp;
+                this.autoScrollFrame = requestAnimationFrame(step);
+            };
+            this.autoScrollFrame = requestAnimationFrame(step);
+        },
+
+        stopAutoScroll() {
+            if (!this.autoScrolling) return;
+            this.autoScrolling = false;
+            cancelAnimationFrame(this.autoScrollFrame);
+            this.autoScrollFrame = 0;
+            this.updateAutoScrollButton();
+        },
+
+        toggleAutoScroll() {
+            if (this.autoScrolling) this.stopAutoScroll();
+            else this.startAutoScroll();
+        },
+
+        updateFullscreenButton() {
+            const active = Boolean(this.overlay) && document.fullscreenElement === this.overlay;
+            this.fullscreenButtonNode?.classList.toggle('is-active', active);
+            this.fullscreenButtonNode?.setAttribute('aria-pressed', active ? 'true' : 'false');
+        },
+
+        async toggleFullscreen() {
+            if (!this.overlay) return;
+            try {
+                if (document.fullscreenElement) {
+                    await document.exitFullscreen();
+                } else if (typeof this.overlay.requestFullscreen === 'function') {
+                    await this.overlay.requestFullscreen();
+                } else {
+                    showToast(getUIText('reading_mode_fullscreen_failed'), { type: 'error' });
+                }
+            } catch (error) {
+                console.error('[nHentai Pro] Fullscreen request failed:', error);
+                showToast(getUIText('reading_mode_fullscreen_failed'), { type: 'error' });
+            }
+        },
+
+        getTouchDistance(touches) {
+            return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+        },
+
+        // 触屏双指缩放：对应桌面的 Ctrl+滚轮。
+        handleTouchStart(event) {
+            if (event.touches.length !== 2) return;
+            this.pinchState = {
+                distance: this.getTouchDistance(event.touches),
+                scale: this.getImageScalePercent()
+            };
+        },
+
+        handleTouchMove(event) {
+            if (!this.pinchState || event.touches.length !== 2) return;
+            event.preventDefault();
+            if (this.pinchState.distance <= 0) return;
+            const ratio = this.getTouchDistance(event.touches) / this.pinchState.distance;
+            this.setImageScalePercent(Math.round(this.pinchState.scale * ratio));
+        },
+
+        handleTouchEnd(event) {
+            if (event.touches.length < 2) this.pinchState = null;
+        },
+
+        pushHistoryEntry() {
+            try {
+                const baseState = history.state && typeof history.state === 'object' ? history.state : {};
+                // 走原型上的原生方法：不触发站点或本脚本对 history.pushState 的包装（地址没变，不是路由切换）。
+                History.prototype.pushState.call(history, { ...baseState, nhReadingMode: true }, '', location.href);
+                this.historyEntryActive = true;
+            } catch (error) {
+                this.historyEntryActive = false;
+                console.error('[nHentai Pro] Failed to push reading mode history entry:', error);
+            }
+        },
+
+        bindPopstate() {
+            if (this.popstateHandler) return;
+            this.popstateHandler = (event) => {
+                if (this.ignoreNextPopstate) {
+                    // close() 主动回退掉自己压入的那条记录，不是真正的导航。
+                    this.ignoreNextPopstate = false;
+                    clearTimeout(this.ignorePopstateTimer);
+                    event.stopImmediatePropagation();
+                    return;
+                }
+                if (!this.isOpen() || !this.historyEntryActive) return;
+                // 用户按了返回：地址未变，只需退出阅读，不让站点路由再处理一次。
+                this.historyEntryActive = false;
+                event.stopImmediatePropagation();
+                this.close({ fromHistory: true });
+            };
+            // 捕获阶段注册，先于站点自己的 popstate 监听。
+            window.addEventListener('popstate', this.popstateHandler, true);
+        },
+
+        releaseHistoryEntry(fromHistory) {
+            if (!this.historyEntryActive) return;
+            this.historyEntryActive = false;
+            if (fromHistory || !history.state?.nhReadingMode) return;
+            this.ignoreNextPopstate = true;
+            // back() 没有产生 popstate 时及时撤销标记，避免吞掉之后真正的返回。
+            clearTimeout(this.ignorePopstateTimer);
+            this.ignorePopstateTimer = setTimeout(() => {
+                this.ignoreNextPopstate = false;
+            }, 800);
+            history.back();
+        },
+
         handleToolInput(event) {
             event?.stopPropagation?.();
             const input = event?.target;
             if (!input?.matches) return;
-            if (input.matches('.nh-reading-tool-scale-input')) {
+            if (input.matches('.nh-reading-tool-page-input')) {
+                const value = Number(input.value);
+                if (Number.isFinite(value) && value >= 1) {
+                    this.scrollToPage(Math.round(value));
+                }
+                input.value = `${this.currentPage}`;
+            } else if (input.matches('.nh-reading-tool-speed-input')) {
+                this.setAutoScrollSpeed(input.value);
+            } else if (input.matches('.nh-reading-tool-scale-input')) {
                 const value = Number(input.value);
                 if (Number.isFinite(value)) {
                     this.setImageScalePercent(value);
@@ -315,6 +545,11 @@
         handleReaderPointerUp(event) {
             if (!this.scrollContainer) return;
             if (event?.pointerType === 'mouse' && event.button !== 0) return;
+            // 自动滚动时点击画面即停止。
+            if (this.autoScrolling) {
+                this.stopAutoScroll();
+                return;
+            }
             if (Date.now() - this.lastReaderScrollAt < 180) return;
             this.showTools();
         },
@@ -322,6 +557,8 @@
         handleReaderScroll() {
             this.lastReaderScrollAt = Date.now();
             this.updateScrollbarThumb();
+            // 自动滚动每帧都会触发 scroll，工具栏已在开始时收起，不必每帧再处理。
+            if (this.autoScrolling) return;
             this.hideTools({ force: true });
         },
 
@@ -677,6 +914,17 @@
                 event.preventDefault();
                 ReadingMode.hideTools({ force: true });
                 ReadingMode.scrollContainer.scrollTo({ top: ReadingMode.scrollContainer.scrollHeight, behavior: 'smooth' });
+                return;
+            }
+
+            if (event.ctrlKey || event.metaKey || event.altKey) return;
+            const key = String(event.key || '').toLowerCase();
+            if (key === 'a') {
+                event.preventDefault();
+                ReadingMode.toggleAutoScroll();
+            } else if (key === 'f') {
+                event.preventDefault();
+                void ReadingMode.toggleFullscreen();
             }
         },
 
@@ -755,11 +1003,20 @@
                             <div class="nh-reading-status"></div>
                         </div>
                         <div class="nh-reading-actions">
+                            <button type="button" class="nh-reading-action nh-reading-fit" title="${getUIText('reading_mode_fit_tip')}"></button>
+                            <button type="button" class="nh-reading-action nh-reading-autoscroll" aria-pressed="false" title="${getUIText('reading_mode_autoscroll_tip')}">${getUIText('reading_mode_autoscroll')}</button>
+                            <button type="button" class="nh-reading-action nh-reading-fullscreen" aria-pressed="false" title="${getUIText('reading_mode_fullscreen_tip')}">${getUIText('reading_mode_fullscreen')}</button>
                             <button type="button" class="nh-reading-close">${getUIText('reading_mode_close')}</button>
                         </div>
                     </div>
                     <div class="nh-reading-main">
-                        <div class="nh-reading-tools" title="${getUIText('reading_mode_tool_scale_tip')}">
+                        <div class="nh-reading-tools">
+                            <label class="nh-reading-tool-field" title="${getUIText('reading_mode_tool_page_tip')}">
+                                <span class="nh-reading-tool-caption">${getUIText('reading_mode_tool_page_label')}</span>
+                                <div class="nh-reading-tool-input-wrap">
+                                    <input type="number" class="nh-reading-tool-input nh-reading-tool-page-input" min="1" max="${Number(meta.total) || meta.pages.length}" step="1">
+                                </div>
+                            </label>
                             <label class="nh-reading-tool-field" title="${getUIText('reading_mode_tool_scale_tip')}">
                                 <span class="nh-reading-tool-caption">${getUIText('reading_mode_tool_scale_label')}</span>
                                 <div class="nh-reading-tool-input-wrap">
@@ -772,6 +1029,12 @@
                                 <div class="nh-reading-tool-input-wrap">
                                     <input type="number" class="nh-reading-tool-input nh-reading-tool-gap-input" min="0" max="80" step="1">
                                     <span class="nh-reading-tool-unit">px</span>
+                                </div>
+                            </label>
+                            <label class="nh-reading-tool-field" title="${getUIText('reading_mode_tool_speed_tip')}">
+                                <span class="nh-reading-tool-caption">${getUIText('reading_mode_tool_speed_label')}</span>
+                                <div class="nh-reading-tool-input-wrap">
+                                    <input type="number" class="nh-reading-tool-input nh-reading-tool-speed-input" min="10" max="600" step="10">
                                 </div>
                             </label>
                         </div>
@@ -800,6 +1063,11 @@
             this.toolRoot = queryOne(overlay, '.nh-reading-tools');
             this.toolScaleInputNode = queryOne(overlay, '.nh-reading-tool-scale-input');
             this.toolGapInputNode = queryOne(overlay, '.nh-reading-tool-gap-input');
+            this.toolPageInputNode = queryOne(overlay, '.nh-reading-tool-page-input');
+            this.toolSpeedInputNode = queryOne(overlay, '.nh-reading-tool-speed-input');
+            this.fitButtonNode = queryOne(overlay, '.nh-reading-fit');
+            this.autoScrollButtonNode = queryOne(overlay, '.nh-reading-autoscroll');
+            this.fullscreenButtonNode = queryOne(overlay, '.nh-reading-fullscreen');
             this.scrollbarItems = new Map();
 
             this.setToolsVisible(false);
@@ -826,6 +1094,15 @@
             this.scrollContainer?.addEventListener('scroll', () => this.handleReaderScroll(), { passive: true });
             this.scrollContainer?.addEventListener('pointerup', (event) => this.handleReaderPointerUp(event));
             this.scrollContainer?.addEventListener('wheel', (event) => this.handleReaderWheel(event), { passive: false });
+            this.scrollContainer?.addEventListener('touchstart', (event) => this.handleTouchStart(event), { passive: true });
+            this.scrollContainer?.addEventListener('touchmove', (event) => this.handleTouchMove(event), { passive: false });
+            this.scrollContainer?.addEventListener('touchend', (event) => this.handleTouchEnd(event), { passive: true });
+            this.scrollContainer?.addEventListener('touchcancel', (event) => this.handleTouchEnd(event), { passive: true });
+            this.fitButtonNode?.addEventListener('click', () => this.toggleFitMode());
+            this.autoScrollButtonNode?.addEventListener('click', () => this.toggleAutoScroll());
+            this.fullscreenButtonNode?.addEventListener('click', () => void this.toggleFullscreen());
+            this.fullscreenChangeHandler = () => this.updateFullscreenButton();
+            document.addEventListener('fullscreenchange', this.fullscreenChangeHandler);
 
             queryOne(overlay, '.nh-reading-close')?.addEventListener('click', () => {
                 this.close();
@@ -873,6 +1150,8 @@
                 this.setupLazyObserver();
                 this.setupPageObserver();
                 this.bindKeydown();
+                this.bindPopstate();
+                this.pushHistoryEntry();
                 this.restoreProgress();
             } catch (error) {
                 console.error('[nHentai Pro] Failed to open reading mode:', error);
@@ -883,15 +1162,26 @@
             }
         },
 
-        close() {
+        close({ fromHistory = false } = {}) {
             if (!this.isOpen()) return;
             this.persistProgress();
             Config.flush();
             this.clearSaveTimer();
             this.clearToolAutoHideTimer();
+            this.stopAutoScroll();
             this.teardownObservers();
             this.unbindKeydown();
+            if (this.fullscreenChangeHandler) {
+                document.removeEventListener('fullscreenchange', this.fullscreenChangeHandler);
+                this.fullscreenChangeHandler = null;
+            }
+            if (document.fullscreenElement === this.overlay) {
+                document.exitFullscreen().catch(error => {
+                    console.error('[nHentai Pro] Failed to exit fullscreen:', error);
+                });
+            }
             this.overlay?.remove();
+            this.releaseHistoryEntry(fromHistory);
 
             this.overlay = null;
             this.scrollContainer = null;
@@ -905,6 +1195,12 @@
             this.toolRoot = null;
             this.toolScaleInputNode = null;
             this.toolGapInputNode = null;
+            this.toolPageInputNode = null;
+            this.toolSpeedInputNode = null;
+            this.fitButtonNode = null;
+            this.autoScrollButtonNode = null;
+            this.fullscreenButtonNode = null;
+            this.pinchState = null;
             this.lastReaderScrollAt = 0;
             this.currentGalleryMeta = null;
             this.scrollbarItems = new Map();

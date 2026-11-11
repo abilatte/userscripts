@@ -261,6 +261,7 @@
         }
         applyGalleryVisibility(galleries);
         galleries.forEach(initPreviewUI);
+        applyReadingProgressBadges(galleries);
         if (translate) runContentTranslation(context);
     }
 
@@ -289,7 +290,7 @@
         const cover = gallery.querySelector(GALLERY_SELECTORS.coverLink);
         if (cover) {
             delete cover.dataset.pageProcessed;
-            queryAll(cover, '.nh-page-number, .inline-preview-ui').forEach(node => node.remove());
+            queryAll(cover, '.nh-page-number, .nh-read-progress, .inline-preview-ui').forEach(node => node.remove());
         }
         queryAll(gallery, '.nh-page-number').forEach(node => {
             if (node.parentElement !== cover) node.remove();
