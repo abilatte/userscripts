@@ -2,7 +2,7 @@
 // @name         起点小说屏蔽工具
 // @name:en      Qidian Novel Blocker
 // @namespace    abilatte
-// @version      2.1
+// @version      2.2
 // @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
 // @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
 // @author       abilatte
@@ -15,6 +15,8 @@
 // @grant        GM_addValueChangeListener
 // @grant        GM_registerMenuCommand
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      api.github.com
 // @license      AGPL-3.0-or-later
 // @homepageURL  https://github.com/abilatte/userscripts
 // @updateURL    https://raw.githubusercontent.com/abilatte/userscripts/main/Qidian/qidian-novel-blocker.user.js
@@ -29,6 +31,18 @@
     const BID_PATTERN = /^\d+$/;
     const HIDDEN_CLASS = "qd-hidden";
     const TOAST_DURATION = 6000;
+
+    // GitHub 同步
+    const SYNC_CONFIG_KEY = "qidian_sync_config";
+    const SYNC_STATE_KEY = "qidian_sync_state";
+    const SYNC_API = "https://api.github.com";
+    const SYNC_DEFAULT_PATH = "qidian/blocklist.json";
+    const SYNC_REPO_PATTERN = /^[\w.-]+\/[\w.-]+$/;
+    const SYNC_PUSH_DELAY = 30 * 1000; // 本地改动后延迟上传，连续操作合并为一次提交
+    const SYNC_PULL_INTERVAL = 2 * 60 * 1000; // 没有本地改动时检查远端的最小间隔
+    const SYNC_LOCK_DURATION = 60 * 1000; // 多个标签页之间的互斥时长
+    const SYNC_TIMEOUT = 30 * 1000;
+    const SYNC_MAX_CONFLICT_RETRIES = 2;
 
     // 起点改版时只需要调整这里的选择器
     const SELECTORS = {
@@ -83,6 +97,12 @@
         .qd-modal-title { font-weight: bold; font-size: 16px; }
         .qd-modal-count { font-weight: normal; color: #666; font-size: 13px; margin-left: 5px; }
         .qd-header-btns { display: flex; align-items: center; gap: 8px; }
+        .qd-sync-bar { padding: 8px 20px; border-bottom: 1px solid #eee; font-size: 13px; }
+        .qd-sync-row { display: flex; align-items: center; gap: 8px; }
+        .qd-sync-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #666; }
+        .qd-sync-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+        .qd-sync-form[hidden] { display: none; }
+        .qd-sync-form .qd-search-input { flex: 1 1 180px; }
         .qd-modal-toolbar { padding: 10px 20px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; }
         .qd-search-input { flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; outline: none; }
         .qd-search-input:focus { border-color: #2a87d4; }
@@ -176,9 +196,12 @@
             if (!Storage._cache) Storage._cache = Storage.normalize(GM_getValue(STORAGE_KEY, {})).map;
             return Storage._cache;
         },
-        saveMap: (map) => {
+        // fromSync 表示数据来自远端合并，不是用户在本机的改动，不记入待上传的改动
+        saveMap: (map, { fromSync = false } = {}) => {
+            const previous = Storage.getMap();
             GM_setValue(STORAGE_KEY, map);
             Storage._cache = map;
+            if (!fromSync) Sync.journal(previous, map);
             Storage._emit();
         },
         // 其他标签页修改了数据
@@ -284,7 +307,263 @@
         }
     };
 
-    // --- 5. 提示条 ---
+    // --- 5. GitHub 同步 ---
+    // 屏蔽列表以 JSON 文件的形式存在用户自己的 GitHub 仓库里，多台设备通过它同步。
+    // - GitHub 更新文件时要求带上文件当前的 sha，远端已被其他设备改动就会拒绝，据此发现冲突
+    // - 本机记录「上次同步之后的改动」（新增/修改、移除），发现远端有新内容时在远端数据上重放这些改动，
+    //   因此另一台设备取消屏蔽的书不会因为本机的旧数据而恢复
+    const Base64 = {
+        encode: (text) => {
+            const bytes = new TextEncoder().encode(text);
+            let binary = "";
+            for (let i = 0; i < bytes.length; i += 0x8000) {
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            }
+            return btoa(binary);
+        },
+        decode: (base64) => {
+            const binary = atob(base64.replace(/\s/g, ""));
+            return new TextDecoder().decode(Uint8Array.from(binary, (ch) => ch.charCodeAt(0)));
+        }
+    };
+
+    const Sync = {
+        _running: false,
+        _timer: 0,
+        _listeners: [],
+
+        // 配置：{ repo: "用户名/仓库名", path, token }
+        getConfig: () => {
+            const config = GM_getValue(SYNC_CONFIG_KEY, null);
+            return config && config.repo && config.path && config.token ? config : null;
+        },
+        saveConfig: (config) => {
+            const current = Sync.getConfig();
+            GM_setValue(SYNC_CONFIG_KEY, config);
+            // 换了同步位置后，旧的 sha 和改动记录不再适用，下次按首次同步处理
+            if (!current || current.repo !== config.repo || current.path !== config.path) GM_setValue(SYNC_STATE_KEY, {});
+            Sync._emit();
+        },
+        clearConfig: () => {
+            GM_setValue(SYNC_CONFIG_KEY, null);
+            GM_setValue(SYNC_STATE_KEY, {});
+            Sync._emit();
+        },
+
+        // 状态：sha 为上次同步时远端文件的版本，null 表示从未同步；upsert / remove 为之后本机改动过的书籍 ID
+        getState: () => ({
+            sha: null,
+            upsert: [],
+            remove: [],
+            lastSyncTime: 0,
+            lastCheckTime: 0,
+            lastError: "",
+            lockUntil: 0,
+            ...GM_getValue(SYNC_STATE_KEY, {})
+        }),
+        // 状态可能被其他标签页或请求期间的本地改动更新，每次都基于最新值修改
+        updateState: (patch) => {
+            GM_setValue(SYNC_STATE_KEY, { ...Sync.getState(), ...patch });
+            Sync._emit();
+        },
+        onChange: (fn) => Sync._listeners.push(fn),
+        _emit: () => Sync._listeners.forEach((fn) => fn()),
+
+        isBusy: () => Sync._running || Sync.getState().lockUntil > Date.now(),
+        describe: () => {
+            if (!Sync.getConfig()) return "☁️ 同步未启用";
+            if (Sync.isBusy()) return "☁️ 正在同步…";
+            const state = Sync.getState();
+            if (state.lastError) return `⚠️ 同步失败：${state.lastError}`;
+            if (state.upsert.length || state.remove.length) return "☁️ 有改动等待上传";
+            return state.lastSyncTime ? `☁️ 已同步 · ${formatDate(state.lastSyncTime)}` : "☁️ 尚未同步";
+        },
+
+        // 两份数据之间的差异：{ upsert: 新增或内容变化的 ID, remove: 被移除的 ID }
+        diff: (oldMap, newMap) => {
+            const same = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+            return {
+                upsert: Object.keys(newMap).filter((bid) => !hasOwn(oldMap, bid) || !same(oldMap[bid], newMap[bid])),
+                remove: Object.keys(oldMap).filter((bid) => !hasOwn(newMap, bid))
+            };
+        },
+        // 本机每次改动后调用。从未同步过时不需要记录，首次同步会把本机和远端整体合并
+        journal: (oldMap, newMap) => {
+            if (!Sync.getConfig()) return;
+            const state = Sync.getState();
+            if (state.sha !== null) {
+                const changes = Sync.diff(oldMap, newMap);
+                const upsert = new Set(state.upsert);
+                const remove = new Set(state.remove);
+                changes.upsert.forEach((bid) => { upsert.add(bid); remove.delete(bid); });
+                changes.remove.forEach((bid) => { remove.add(bid); upsert.delete(bid); });
+                Sync.updateState({ upsert: Array.from(upsert), remove: Array.from(remove) });
+            }
+            Sync.schedule();
+        },
+        schedule: () => {
+            clearTimeout(Sync._timer);
+            Sync._timer = setTimeout(() => Sync.run(), SYNC_PUSH_DELAY);
+        },
+
+        // 每本书一行、按 ID 排序、字段顺序固定：同样的数据总是得到同样的文本，便于比较，也便于在 GitHub 上看每次提交的差异
+        serialize: (map) => {
+            const lines = Object.keys(map).sort()
+                .map((bid) => `  ${JSON.stringify(bid)}: ${JSON.stringify(Storage.normalizeEntry(map[bid]))}`);
+            return lines.length ? `{\n${lines.join(",\n")}\n}\n` : "{}\n";
+        },
+
+        request: (config, method, path, body) => new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: method,
+                url: SYNC_API + path,
+                headers: {
+                    "Accept": "application/vnd.github+json",
+                    "Authorization": `Bearer ${config.token}`,
+                    "X-GitHub-Api-Version": "2022-11-28",
+                    ...(body ? { "Content-Type": "application/json" } : {})
+                },
+                data: body ? JSON.stringify(body) : undefined,
+                timeout: SYNC_TIMEOUT,
+                anonymous: true,
+                nocache: true,
+                onload: resolve,
+                onerror: () => reject(new Error("无法连接 GitHub，请检查网络或代理")),
+                ontimeout: () => reject(new Error("连接 GitHub 超时"))
+            });
+        }),
+        assertOk: (res) => {
+            if (res.status >= 200 && res.status < 300) return;
+            const reasons = {
+                401: "令牌无效或已过期",
+                403: "令牌权限不足，或触发了 GitHub 的访问频率限制",
+                404: "仓库不存在，或令牌无权访问该仓库"
+            };
+            throw new Error(reasons[res.status] || `GitHub 返回了 ${res.status}`);
+        },
+        contentsPath: (config) => `/repos/${config.repo}/contents/${config.path.split("/").map(encodeURIComponent).join("/")}`,
+
+        // 返回 { sha, map }；文件还不存在时返回 null
+        fetchRemote: async (config) => {
+            // GitHub 的响应带 max-age=60，不加时间戳可能读到刚上传之前的旧版本
+            const res = await Sync.request(config, "GET", `${Sync.contentsPath(config)}?t=${Date.now()}`);
+            if (res.status === 404) return null;
+            Sync.assertOk(res);
+            const meta = JSON.parse(res.responseText);
+            if (Array.isArray(meta) || meta.type !== "file") throw new Error("同步路径指向的不是文件");
+
+            let content = meta.content;
+            if (meta.encoding !== "base64" || !content) {
+                // 超过 1MB 的文件不随元数据返回内容
+                const blobRes = await Sync.request(config, "GET", `/repos/${config.repo}/git/blobs/${meta.sha}`);
+                Sync.assertOk(blobRes);
+                content = JSON.parse(blobRes.responseText).content;
+            }
+
+            let raw;
+            try {
+                raw = JSON.parse(Base64.decode(content));
+            } catch (err) {
+                raw = null;
+            }
+            // 远端文件损坏时必须停下，继续同步会用本机数据覆盖它
+            if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+                throw new Error("远端文件不是有效的屏蔽列表，已停止同步以免覆盖");
+            }
+            return { sha: meta.sha, map: Storage.normalize(raw).map };
+        },
+        // 返回 { sha }；远端在读取之后又被改动时返回 { conflict: true }
+        pushRemote: async (config, text, count, sha) => {
+            const res = await Sync.request(config, "PUT", Sync.contentsPath(config), {
+                message: `sync: ${count} books`,
+                content: Base64.encode(text),
+                ...(sha ? { sha: sha } : {})
+            });
+            // 409：sha 与远端不符；422：文件已存在但没有带 sha（读取时文件还不存在）
+            if (res.status === 409 || res.status === 422) return { conflict: true };
+            Sync.assertOk(res);
+            return { sha: JSON.parse(res.responseText).content.sha };
+        },
+
+        // 把远端的新内容合并进本机
+        mergeRemote: (remote) => {
+            const state = Sync.getState();
+            if (remote.sha === state.sha) return;
+
+            const local = Storage.getMap();
+            let merged;
+            if (state.sha === null) {
+                // 首次同步：两边的记录都保留，同一本书合并字段
+                merged = { ...remote.map };
+                Object.keys(local).forEach((bid) => { merged[bid] = { ...remote.map[bid], ...local[bid] }; });
+            } else {
+                merged = { ...remote.map };
+                state.upsert.forEach((bid) => { if (hasOwn(local, bid)) merged[bid] = local[bid]; });
+                state.remove.forEach((bid) => delete merged[bid]);
+            }
+            Storage.saveMap(merged, { fromSync: true });
+            Sync.updateState({ sha: remote.sha });
+        },
+        // 本机的 uploaded 这份数据已与远端一致；请求期间又发生的本地改动留到下一次上传
+        settle: (uploaded, sha) => {
+            const changes = Sync.diff(uploaded, Storage.getMap());
+            Sync.updateState({ sha: sha, upsert: changes.upsert, remove: changes.remove });
+            if (changes.upsert.length || changes.remove.length) Sync.schedule();
+        },
+        syncOnce: async (config, attempt = 0) => {
+            const remote = await Sync.fetchRemote(config);
+            if (remote) Sync.mergeRemote(remote);
+
+            const local = Storage.getMap();
+            const text = Sync.serialize(local);
+            if (remote && text === Sync.serialize(remote.map)) {
+                Sync.settle(local, remote.sha);
+                return;
+            }
+
+            const result = await Sync.pushRemote(config, text, Object.keys(local).length, remote ? remote.sha : null);
+            if (result.conflict) {
+                if (attempt >= SYNC_MAX_CONFLICT_RETRIES) throw new Error("远端数据正在被其他设备修改，稍后会自动重试");
+                await Sync.syncOnce(config, attempt + 1);
+                return;
+            }
+            Sync.settle(local, result.sha);
+        },
+
+        // force 为 true 时忽略检查间隔。同步失败不影响屏蔽功能，错误显示在管理面板里
+        run: async ({ force = false } = {}) => {
+            const config = Sync.getConfig();
+            if (!config || Sync._running) return;
+
+            const state = Sync.getState();
+            const now = Date.now();
+            if (state.lockUntil > now) return; // 其他标签页正在同步
+            const hasPending = state.upsert.length > 0 || state.remove.length > 0;
+            const checkedRecently = now - state.lastCheckTime < SYNC_PULL_INTERVAL;
+            if (!force && !hasPending && state.sha !== null && checkedRecently) return;
+
+            Sync._running = true;
+            clearTimeout(Sync._timer);
+            Sync.updateState({ lockUntil: now + SYNC_LOCK_DURATION });
+            let lastError = "";
+            try {
+                await Sync.syncOnce(config);
+            } catch (err) {
+                console.error("QidianBlocker Sync Error:", err);
+                lastError = err.message;
+            }
+            Sync._running = false;
+            const finishedAt = Date.now();
+            Sync.updateState({
+                lockUntil: 0,
+                lastCheckTime: finishedAt,
+                lastError: lastError,
+                ...(lastError ? {} : { lastSyncTime: finishedAt })
+            });
+        }
+    };
+
+    // --- 6. 提示条 ---
     // 同一时间只显示一条，带一个操作按钮，超时自动消失
     const Toast = {
         el: null,
@@ -317,7 +596,7 @@
         }
     };
 
-    // --- 6. 列表页（全部作品） ---
+    // --- 7. 列表页（全部作品） ---
     const ListPage = {
         apply: () => {
             const map = Storage.getMap();
@@ -385,7 +664,7 @@
         }
     };
 
-    // --- 7. 详情页 ---
+    // --- 8. 详情页 ---
     const DetailPage = {
         apply: (bid) => {
             let btn = document.getElementById("qd-detail-btn");
@@ -426,7 +705,7 @@
         }
     };
 
-    // --- 8. 管理面板 ---
+    // --- 9. 管理面板 ---
     const UNKNOWN_CATEGORY = "__unknown__";
 
     const Panel = {
@@ -457,6 +736,20 @@
                             <button class="qd-btn" data-el="export">导出</button>
                             <button class="qd-btn qd-btn-danger" data-el="clear">全部移除</button>
                             <button class="qd-btn qd-btn-close" data-el="close" title="关闭">×</button>
+                        </div>
+                    </div>
+                    <div class="qd-sync-bar">
+                        <div class="qd-sync-row">
+                            <span class="qd-sync-status" data-el="syncStatus"></span>
+                            <button class="qd-btn" data-el="syncNow">立即同步</button>
+                            <button class="qd-btn" data-el="syncSettings">同步设置</button>
+                        </div>
+                        <div class="qd-sync-form" data-el="syncForm" hidden>
+                            <input type="text" class="qd-search-input" data-el="syncRepo" placeholder="仓库：用户名/仓库名" spellcheck="false">
+                            <input type="text" class="qd-search-input" data-el="syncPath" placeholder="文件路径" spellcheck="false">
+                            <input type="password" class="qd-search-input" data-el="syncToken" autocomplete="off">
+                            <button class="qd-btn" data-el="syncSave">保存并同步</button>
+                            <button class="qd-btn qd-btn-danger" data-el="syncDisable">停用同步</button>
                         </div>
                     </div>
                     <div class="qd-modal-toolbar">
@@ -530,6 +823,16 @@
                 if (ids.length && confirm(`确认要移除选中的 ${ids.length} 本书吗？`)) Storage.remove(ids);
             };
 
+            const syncConfig = Sync.getConfig();
+            els.syncRepo.value = syncConfig ? syncConfig.repo : "";
+            els.syncPath.value = syncConfig ? syncConfig.path : SYNC_DEFAULT_PATH;
+            els.syncSettings.onclick = () => { els.syncForm.hidden = !els.syncForm.hidden; };
+            els.syncNow.onclick = () => Sync.run({ force: true });
+            els.syncSave.onclick = Panel.saveSync;
+            els.syncDisable.onclick = () => {
+                if (confirm("确认停用同步吗？\n本机和 GitHub 上的屏蔽列表都会保留，只是不再互相同步。")) Sync.clearConfig();
+            };
+
             els.import.onclick = Transfer.importFile;
             els.export.onclick = Transfer.exportFile;
             els.clear.onclick = () => {
@@ -560,6 +863,44 @@
 
         refresh: () => {
             if (Panel.els) Panel.render();
+        },
+
+        refreshSync: () => {
+            if (!Panel.els) return;
+            const { els } = Panel;
+            const configured = Sync.getConfig() !== null;
+            els.syncStatus.textContent = Sync.describe();
+            els.syncStatus.title = els.syncStatus.textContent;
+            els.syncNow.disabled = !configured || Sync.isBusy();
+            els.syncDisable.disabled = !configured;
+            els.syncToken.placeholder = configured ? "GitHub 令牌（已保存，留空则不修改）" : "GitHub 令牌";
+        },
+
+        // 令牌只保存在脚本管理器的存储里，不会回填到输入框
+        saveSync: () => {
+            const { els } = Panel;
+            const current = Sync.getConfig();
+            const config = {
+                repo: els.syncRepo.value.trim(),
+                path: els.syncPath.value.trim().replace(/^\/+/, ""),
+                token: els.syncToken.value.trim() || (current ? current.token : "")
+            };
+            if (!SYNC_REPO_PATTERN.test(config.repo)) {
+                alert("仓库格式应为「用户名/仓库名」。");
+                return;
+            }
+            if (!config.path) {
+                alert("请填写文件路径。");
+                return;
+            }
+            if (!config.token) {
+                alert("请填写 GitHub 令牌。");
+                return;
+            }
+            Sync.saveConfig(config);
+            els.syncToken.value = "";
+            els.syncForm.hidden = true;
+            Sync.run({ force: true });
         },
 
         getList: () => {
@@ -647,6 +988,7 @@
             els.next.disabled = state.currentPage === totalPages;
             els.pageInfo.textContent = `${state.currentPage} / ${totalPages}`;
             Panel.syncSelection();
+            Panel.refreshSync();
         },
 
         createRow: (item) => {
@@ -702,13 +1044,14 @@
         }
     };
 
-    // --- 9. 初始化 ---
+    // --- 10. 初始化 ---
     function init() {
         const detailBid = PageType.detailBid();
         const applyPage = () => {
             try {
                 if (PageType.isList()) ListPage.apply();
-                else if (detailBid) DetailPage.apply(detailBid);
+                // 同步可能在页面解析结束前就带来数据变化，这时详情页的按钮区还不存在
+                else if (detailBid && document.readyState !== "loading") DetailPage.apply(detailBid);
             } catch (e) {
                 console.error("QidianBlocker Error:", e);
             }
@@ -725,6 +1068,16 @@
         if (PageType.isList()) ListPage.watch(applyPage);
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", applyPage);
         else applyPage();
+
+        // 同步：打开页面、切回页面时检查远端；切走页面时把还没上传的改动立即传上去
+        Sync.onChange(Panel.refreshSync);
+        [SYNC_CONFIG_KEY, SYNC_STATE_KEY].forEach((key) => {
+            GM_addValueChangeListener(key, (name, oldValue, newValue, remote) => {
+                if (remote) Sync._emit();
+            });
+        });
+        document.addEventListener("visibilitychange", () => Sync.run());
+        Sync.run();
     }
 
     init();
