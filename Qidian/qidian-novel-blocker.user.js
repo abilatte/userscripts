@@ -2,7 +2,7 @@
 // @name         起点小说屏蔽工具
 // @name:en      Qidian Novel Blocker
 // @namespace    abilatte
-// @version      2.5
+// @version      2.6
 // @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
 // @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
 // @author       abilatte
@@ -35,6 +35,7 @@
     const BID_PATTERN = /^\d+$/;
     const HIDDEN_CLASS = "qd-hidden";
     const TOAST_DURATION = 6000;
+    const COVER_PAGER_ENABLED_KEY = "qidian_cover_pager_enabled";
     const PAGE_LOAD_TIMEOUT = 15 * 1000;
 
     // GitHub 同步
@@ -1257,12 +1258,14 @@
 
     // --- 10. 初始化 ---
     function init() {
+        const isListPage = PageType.isList();
+        const coverPagerEnabled = isListPage && GM_getValue(COVER_PAGER_ENABLED_KEY, true);
         const detailBid = PageType.detailBid();
         const applyPage = () => {
             try {
-                if (PageType.isList()) {
+                if (isListPage) {
                     ListPage.apply();
-                    if (document.readyState !== "loading") CoverPager.mount();
+                    if (coverPagerEnabled && document.readyState !== "loading") CoverPager.mount();
                 }
                 // 同步可能在页面解析结束前就带来数据变化，这时详情页的按钮区还不存在
                 else if (detailBid && document.readyState !== "loading") DetailPage.apply(detailBid);
@@ -1277,9 +1280,15 @@
             if (remote && newValue) Storage.accept(newValue);
         });
         GM_registerMenuCommand("⚙️ 管理屏蔽列表", Panel.open);
+        if (isListPage) {
+            GM_registerMenuCommand(`${coverPagerEnabled ? "关闭" : "开启"}内置无缝翻页`, () => {
+                GM_setValue(COVER_PAGER_ENABLED_KEY, !coverPagerEnabled);
+                location.reload();
+            });
+        }
 
         // 脚本在 document-start 注入：列表页边解析边处理，详情页的按钮区要等解析结束才存在
-        if (PageType.isList()) ListPage.watch(applyPage);
+        if (isListPage) ListPage.watch(applyPage);
         if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", applyPage);
         else applyPage();
 
