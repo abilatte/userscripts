@@ -2,7 +2,7 @@
 // @name         起点小说屏蔽工具
 // @name:en      Qidian Novel Blocker
 // @namespace    abilatte
-// @version      2.4
+// @version      2.5
 // @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
 // @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
 // @author       abilatte
@@ -35,6 +35,7 @@
     const BID_PATTERN = /^\d+$/;
     const HIDDEN_CLASS = "qd-hidden";
     const TOAST_DURATION = 6000;
+    const PAGE_LOAD_TIMEOUT = 15 * 1000;
 
     // GitHub 同步
     const SYNC_STATE_KEY = "qidian_sync_state";
@@ -47,20 +48,29 @@
     const SYNC_MAX_CONFLICT_RETRIES = 2;
 
     // 起点改版时只需要调整这里的选择器
+    const COVER_LIST = "#book-img-text .all-img-list";
+    const COVER_LAYOUT = {
+        item: `${COVER_LIST} > li`,
+        link: ".book-mid-info h2 > a[data-bid]",
+        category: "p.author a:not(.name):not(.go-sub-type)",
+        subCategory: "a.go-sub-type"
+    };
     const SELECTORS = {
         listLayouts: [
             // 图文模式，两列
-            { item: "#book-img-text .all-img-list > li", link: ".book-mid-info h2 > a[data-bid]", category: "p.author a:not(.name):not(.go-sub-type)", subCategory: "a.go-sub-type" },
+            COVER_LAYOUT,
             // 文字模式
             { item: "#book-text .rank-table-list > tbody > tr", link: "a.name[data-bid]", category: "a.type", subCategory: "a.go-sub-type" }
         ],
+        pagination: "#page-container",
+        nextPage: ".lbf-pagination-next:not(.lbf-pagination-disabled)[href]",
         detailBtnGroup: ".normal-btn",
         detailTitle: "#bookName",
         detailCategory: { category: ".book-attribute a:not([href*='subCateId'])", subCategory: ".book-attribute a[href*='subCateId']" }
     };
 
     const PageType = {
-        isList: () => /^\/all(\/|$)/.test(location.pathname),
+        isList: (pathname = location.pathname) => /^\/all(\/|$)/.test(pathname),
         detailBid: () => {
             const match = location.pathname.match(/^\/book\/(\d+)/);
             return match ? match[1] : null;
@@ -81,6 +91,9 @@
         /* 原站用上边框分隔各行，并靠 li:first-child 和 li:first-child + li 去掉首行的上边框。
            隐藏条目或插入分页条后「首行」不再固定，改为每个条目统一用下边框分隔，同一行的条目始终等高 */
         #book-img-text .all-img-list > li:has(.book-mid-info) { border-top: none; padding-top: 0; border-bottom: 1px solid #e6e6e6; margin-bottom: 25px; }
+        .qd-list-pager { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 36px; padding: 4px 0; color: #666; font-size: 13px; }
+        .qd-list-retry { padding: 2px 6px; border: 0; background: none; color: #0060a8; cursor: pointer; }
+        .qd-list-retry[hidden] { display: none; }
 
         /* 列表页屏蔽按钮：插在书名链接前并右浮动，文字模式的 a.name 是 block，放在后面会换行 */
         .qd-block-btn { float: right; margin: 2px 0 0 4px; cursor: pointer; font-size: 15px; line-height: 1; opacity: 0.5; transition: opacity 0.2s, transform 0.2s; user-select: none; }
@@ -722,7 +735,8 @@
             const isItemNode = (node) => node.nodeType === Node.ELEMENT_NODE &&
                 (node.matches(itemSelector) || node.querySelector(itemSelector) !== null);
             new MutationObserver((mutations) => {
-                if (document.readyState === "loading" || mutations.some((m) => Array.from(m.addedNodes).some(isItemNode))) {
+                if (document.readyState === "loading" || CoverPager.view?.list.isConnected === false ||
+                    mutations.some((m) => Array.from(m.addedNodes).some(isItemNode))) {
                     onItemsChanged();
                 }
             }).observe(document, { childList: true, subtree: true });
@@ -749,6 +763,127 @@
                 }
             });
             return btn;
+        }
+    };
+
+    // 图文列表复用原站的「下一页」链接，所有卡片直接追加到原来的 ul。
+    const CoverPager = {
+        view: null,
+
+        readPage: (root, url) => {
+            const pager = root.querySelector(SELECTORS.pagination);
+            const number = Number(pager?.dataset.page);
+            if (!Number.isInteger(number) || number < 1) return null;
+
+            const href = pager.querySelector(SELECTORS.nextPage)?.getAttribute("href");
+            if (!href) return { number, next: null };
+            const next = new URL(href, url);
+            next.hash = "";
+            if (next.origin !== location.origin || !PageType.isList(next.pathname) || next.href === url) {
+                throw new Error("起点返回了无效的下一页地址");
+            }
+            return { number, next: next.href };
+        },
+
+        mount: () => {
+            const list = document.querySelector(COVER_LIST);
+            if (CoverPager.view?.list === list) return;
+            const previous = CoverPager.view;
+            if (previous) {
+                previous.observer.disconnect();
+                previous.request?.abort();
+                previous.footer.remove();
+                CoverPager.view = null;
+            }
+            if (!list) return;
+            const page = CoverPager.readPage(document, location.href);
+            if (!page?.next) return;
+
+            const footer = document.createElement("div");
+            footer.className = "qd-list-pager";
+            const status = document.createElement("span");
+            status.setAttribute("role", "status");
+            const retry = document.createElement("button");
+            retry.type = "button";
+            retry.className = "qd-list-retry";
+            retry.textContent = "重试";
+            retry.hidden = true;
+            footer.append(status, retry);
+            list.closest("#book-img-text").after(footer);
+
+            const observer = new IntersectionObserver((entries) => {
+                if (entries.some((entry) => entry.isIntersecting) && retry.hidden) CoverPager.load(view);
+            }, { rootMargin: "0px 0px 320px" });
+            const view = { list, footer, status, retry, observer, page, request: null };
+            CoverPager.view = view;
+            retry.onclick = () => CoverPager.load(view);
+            CoverPager.showProgress(view);
+            observer.observe(footer);
+        },
+
+        showProgress: (view, message = "") => {
+            view.status.textContent = `已加载到第 ${view.page.number} 页${message}`;
+        },
+
+        append: (list, items, baseUrl) => {
+            const getBid = (item) => item.querySelector(COVER_LAYOUT.link)?.dataset.bid;
+            const seen = new Set(Array.from(list.children, getBid));
+            const fragment = document.createDocumentFragment();
+            items.forEach((item) => {
+                const bid = getBid(item);
+                if (seen.has(bid)) return;
+                seen.add(bid);
+                const card = document.importNode(item, true);
+                card.querySelectorAll("script").forEach((script) => script.remove());
+                card.querySelectorAll("a[href], img[src]").forEach((el) => {
+                    const attr = el.tagName === "A" ? "href" : "src";
+                    el.setAttribute(attr, new URL(el.getAttribute(attr), baseUrl).href);
+                });
+                fragment.append(card);
+            });
+            list.append(fragment);
+        },
+
+        load: async (view) => {
+            if (CoverPager.view !== view || !view.list.isConnected || view.request || !view.page.next) return;
+            const request = new AbortController();
+            const timer = setTimeout(() => request.abort(), PAGE_LOAD_TIMEOUT);
+            const url = view.page.next;
+            view.request = request;
+            view.observer.disconnect();
+            view.retry.hidden = true;
+            CoverPager.showProgress(view, " · 正在加载下一页…");
+            try {
+                const response = await fetch(url, {
+                    credentials: "same-origin",
+                    mode: "same-origin",
+                    redirect: "error",
+                    signal: request.signal
+                });
+                if (response.status !== 200) throw new Error(`起点返回 HTTP ${response.status}`);
+                const source = new DOMParser().parseFromString(await response.text(), "text/html");
+                if (CoverPager.view !== view || !view.list.isConnected) return;
+                const page = CoverPager.readPage(source, url);
+                const items = Array.from(source.querySelectorAll(COVER_LAYOUT.item)).filter((item) =>
+                    BID_PATTERN.test(item.querySelector(COVER_LAYOUT.link)?.dataset.bid ?? ""));
+                if (page?.number !== view.page.number + 1 || !items.length) {
+                    throw new Error("未找到下一页的图文书目");
+                }
+
+                CoverPager.append(view.list, items, url);
+                view.page = page;
+                CoverPager.showProgress(view, page.next ? "" : " · 已到最后一页");
+                // 如果下一页的书全被屏蔽，底部仍在视野内，需要重新观察才能继续加载。
+                if (page.next) view.observer.observe(view.footer);
+            } catch (err) {
+                if (CoverPager.view !== view || !view.list.isConnected) return;
+                console.warn("QidianBlocker Pagination Error:", err);
+                CoverPager.showProgress(view, " · 下一页加载失败");
+                view.retry.hidden = false;
+            } finally {
+                clearTimeout(timer);
+                view.request = null;
+            }
         }
     };
 
@@ -1125,7 +1260,10 @@
         const detailBid = PageType.detailBid();
         const applyPage = () => {
             try {
-                if (PageType.isList()) ListPage.apply();
+                if (PageType.isList()) {
+                    ListPage.apply();
+                    if (document.readyState !== "loading") CoverPager.mount();
+                }
                 // 同步可能在页面解析结束前就带来数据变化，这时详情页的按钮区还不存在
                 else if (detailBid && document.readyState !== "loading") DetailPage.apply(detailBid);
             } catch (e) {
