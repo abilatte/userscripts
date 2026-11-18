@@ -117,6 +117,43 @@ test("首次同步遇到 SHA 冲突，重试保留本机记录并接受远端变
     assert.deepEqual(h.errors, []);
 });
 
+test("远端含无效记录时停止同步，既不改本机书单也不覆盖远端", { timeout: 3000 }, async () => {
+    for (const remote of [
+        { settings: { theme: "dark" } },
+        { 2: entry("有效书目"), 3: { title: "未知格式", notes: "保留这段内容" } },
+        { 2: { title: "异常时间", time: true } }
+    ]) {
+        const h = createHarness({ qidian_blocked_map_v5: { 1: "本机书" } });
+        const { Sync, DATA_KEY } = h.createTab();
+        await Sync.saveConfig({ ...config(), path: "wrong.json" });
+        const running = Sync.run();
+        (await h.nextRequest("GET")).remote("original", remote);
+        await running;
+        assert.deepEqual(h.requests, []);
+        const state = h.saved.get(DATA_KEY);
+        assert.deepEqual(Object.keys(state.map), ["1"]);
+        assert.equal(state.sync.sha, null);
+        assert.match(state.sync.lastError, /mock\/old\/wrong\.json/);
+    }
+});
+
+test("旧版字符串记录与空书单仍可作为远端数据", { timeout: 3000 }, async () => {
+    for (const remote of [{ 2: "旧格式书目" }, {}]) {
+        const h = createHarness();
+        const { Sync, DATA_KEY } = h.createTab();
+        await Sync.saveConfig(config());
+        const running = Sync.run();
+        (await h.nextRequest("GET")).remote("legacy", remote);
+        await running;
+        assert.deepEqual(h.requests, []);
+        const state = h.saved.get(DATA_KEY);
+        assert.deepEqual(Object.keys(state.map), Object.keys(remote));
+        if (remote[2]) assert.deepEqual(state.map[2], { title: "旧格式书目", time: 0 });
+        assert.equal(state.sync.sha, "legacy");
+        assert.equal(state.sync.lastError, "");
+    }
+});
+
 test("首次同步耗尽重试后，重新打开标签页仍能上传本机记录", { timeout: 3000 }, async () => {
     const h = createHarness({ qidian_blocked_map_v5: { 1: "本机书" } });
     const a = h.createTab();

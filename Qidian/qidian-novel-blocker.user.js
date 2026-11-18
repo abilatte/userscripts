@@ -2,7 +2,7 @@
 // @name         起点小说屏蔽工具
 // @name:en      Qidian Novel Blocker
 // @namespace    abilatte
-// @version      2.6
+// @version      2.7
 // @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
 // @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
 // @author       abilatte
@@ -37,6 +37,9 @@
     const TOAST_DURATION = 6000;
     const COVER_PAGER_ENABLED_KEY = "qidian_cover_pager_enabled";
     const PAGE_LOAD_TIMEOUT = 15 * 1000;
+    const PAGE_LOAD_MARGIN = 320;
+    const PAGE_SCROLL_RETRY_DELAY = 1500;
+    const PAGE_SCROLL_RETRY_LIMIT = 2;
 
     // GitHub 同步
     const SYNC_STATE_KEY = "qidian_sync_state";
@@ -51,6 +54,7 @@
     // 起点改版时只需要调整这里的选择器
     const COVER_LIST = "#book-img-text .all-img-list";
     const COVER_LAYOUT = {
+        root: "#book-img-text",
         item: `${COVER_LIST} > li`,
         link: ".book-mid-info h2 > a[data-bid]",
         category: "p.author a:not(.name):not(.go-sub-type)",
@@ -61,7 +65,7 @@
             // 图文模式，两列
             COVER_LAYOUT,
             // 文字模式
-            { item: "#book-text .rank-table-list > tbody > tr", link: "a.name[data-bid]", category: "a.type", subCategory: "a.go-sub-type" }
+            { root: "#book-text", item: "#book-text .rank-table-list > tbody > tr", link: "a.name[data-bid]", category: "a.type", subCategory: "a.go-sub-type" }
         ],
         pagination: "#page-container",
         nextPage: ".lbf-pagination-next:not(.lbf-pagination-disabled)[href]",
@@ -92,9 +96,14 @@
         /* 原站用上边框分隔各行，并靠 li:first-child 和 li:first-child + li 去掉首行的上边框。
            隐藏条目或插入分页条后「首行」不再固定，改为每个条目统一用下边框分隔，同一行的条目始终等高 */
         #book-img-text .all-img-list > li:has(.book-mid-info) { border-top: none; padding-top: 0; border-bottom: 1px solid #e6e6e6; margin-bottom: 25px; }
-        .qd-list-pager { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 36px; padding: 4px 0; color: #666; font-size: 13px; }
-        .qd-list-retry { padding: 2px 6px; border: 0; background: none; color: #0060a8; cursor: pointer; }
-        .qd-list-retry[hidden] { display: none; }
+        .qd-list-pager, .qd-hidden-summary { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; color: #666; font-size: 13px; }
+        .qd-list-pager { min-height: 36px; padding: 4px 0; }
+        .qd-hidden-summary { position: fixed; top: clamp(64px, 18vh, 180px); right: 16px; z-index: 4; max-width: calc(100vw - 32px); box-sizing: border-box; padding: 4px 10px; border: 1px solid #e6e6e6; border-radius: 4px; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08); }
+        .qd-list-action { padding: 2px 6px; border: 0; background: none; color: #0060a8; cursor: pointer; }
+        .qd-list-action[hidden], .qd-hidden-summary[hidden] { display: none; }
+        .qd-blocked-preview .qd-block-btn { display: none; }
+        .qd-blocked-preview-label { display: none; float: right; margin: 0 0 0 6px; color: #a13c35; font-size: 12px; }
+        .qd-blocked-preview .qd-blocked-preview-label { display: inline; }
 
         /* 列表页屏蔽按钮：插在书名链接前并右浮动，文字模式的 a.name 是 block，放在后面会换行 */
         .qd-block-btn { float: right; margin: 2px 0 0 4px; cursor: pointer; font-size: 15px; line-height: 1; opacity: 0.5; transition: opacity 0.2s, transform 0.2s; user-select: none; }
@@ -230,7 +239,7 @@
             Storage._data = data;
             Sync.onDataChange(data);
             if (!previous || data.mapRevision !== previous.mapRevision) {
-                Storage._listeners.forEach((fn) => fn());
+                Storage._listeners.forEach((fn) => fn(data.map, previous?.map));
             }
         },
         transact: async (edit) => {
@@ -553,11 +562,24 @@
             } catch (err) {
                 raw = null;
             }
-            // 远端文件损坏时必须停下，继续同步会用本机数据覆盖它
-            if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-                throw new Error("远端文件不是有效的屏蔽列表，已停止同步以免覆盖");
-            }
-            return { sha: meta.sha, map: Storage.normalize(raw).map };
+            const invalid = () => new Error(`远端文件 ${config.repo}/${config.path} 不是有效的屏蔽列表，已停止同步`);
+            if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw invalid();
+            // 导入允许跳过坏记录，同步必须保留整个远端文件；旧版字符串记录仍然有效。
+            if (Object.values(raw).some((entry) => !Sync.isRemoteEntry(entry))) throw invalid();
+            const { map, skipped } = Storage.normalize(raw);
+            if (skipped) throw invalid();
+            return { sha: meta.sha, map };
+        },
+        isRemoteEntry: (entry) => {
+            if (typeof entry === "string") return true;
+            if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+            return Object.entries(entry).every(([key, value]) => {
+                if (key === "time") {
+                    return (typeof value === "number" || (typeof value === "string" && value.trim() !== "")) &&
+                        Number.isFinite(Number(value)) && Number(value) >= 0;
+                }
+                return ["title", "category", "subCategory"].includes(key) && typeof value === "string";
+            });
         },
         // 返回 { sha }；远端在读取之后又被改动时返回 { conflict: true }
         pushRemote: async (active, text, count, sha) => {
@@ -696,51 +718,158 @@
 
     // --- 7. 列表页（全部作品） ---
     const ListPage = {
-        apply: () => {
-            const map = Storage.getMap();
-            const categoryUpdates = {};
-            SELECTORS.listLayouts.forEach((layout) => {
-                // 列表中可能混有无缝翻页脚本插入的分页条，只有整组都找不到书籍链接时才视为选择器失效
-                let found = 0;
-                let missing = 0;
-                document.querySelectorAll(layout.item).forEach((item) => {
-                    const link = item.querySelector(layout.link);
-                    const bid = link ? link.dataset.bid : "";
-                    if (!BID_PATTERN.test(bid)) {
-                        missing++;
-                        return;
-                    }
-                    found++;
-                    const blocked = hasOwn(map, bid);
-                    item.classList.toggle(HIDDEN_CLASS, blocked);
-                    // 被隐藏的条目仍在 DOM 中，顺手补全旧记录的分区
-                    if (blocked && Category.isMissing(map[bid])) {
-                        categoryUpdates[bid] = Category.fromElements(item, layout);
-                    }
-                    if (!item.querySelector(".qd-block-btn")) {
-                        link.before(ListPage.createButton(bid, link, item, layout));
-                    }
-                });
-                // 页面解析期间条目可能还不完整，等解析结束后再判断
-                if (missing && !found && document.readyState !== "loading") {
-                    console.warn(`QidianBlocker: ${missing} 个条目均未找到书籍链接`, layout);
+        itemSelector: SELECTORS.listLayouts.map((layout) => layout.item).join(", "),
+        byItem: new Map(),
+        byBid: new Map(),
+        blocked: new Set(),
+        summary: null,
+        reveal: false,
+
+        forget: (item) => {
+            const record = ListPage.byItem.get(item);
+            if (!record) return;
+            ListPage.byItem.delete(item);
+            const records = ListPage.byBid.get(record.bid);
+            records.delete(record);
+            if (!records.size) {
+                ListPage.byBid.delete(record.bid);
+                ListPage.blocked.delete(record.bid);
+            }
+            ListPage.setVisibility(item, false);
+            record.button.remove();
+            record.label?.remove();
+        },
+
+        track: (item) => {
+            const layout = SELECTORS.listLayouts.find((candidate) => item.matches(candidate.item));
+            const link = layout && item.querySelector(layout.link);
+            const bid = link?.dataset.bid ?? "";
+            const current = ListPage.byItem.get(item);
+            if (current && current.layout === layout && current.link === link && current.bid === bid &&
+                current.button.parentElement === link.parentElement) {
+                return current;
+            }
+            ListPage.forget(item);
+            if (!BID_PATTERN.test(bid)) return null;
+
+            // 第三方翻页插件可能复制了本脚本的按钮，但复制的节点没有点击处理函数。
+            item.querySelectorAll(".qd-block-btn, .qd-blocked-preview-label").forEach((el) => el.remove());
+            const button = ListPage.createButton(bid, link, item, layout);
+            link.before(button);
+            const record = { bid, item, link, layout, button, label: null };
+            ListPage.byItem.set(item, record);
+            if (!ListPage.byBid.has(bid)) ListPage.byBid.set(bid, new Set());
+            ListPage.byBid.get(bid).add(record);
+            return record;
+        },
+
+        update: (records, map) => {
+            const updates = {};
+            records.forEach((record) => {
+                const { item, bid, link, layout } = record;
+                const blocked = hasOwn(map, bid);
+                ListPage.setVisibility(item, blocked);
+                if (!blocked) {
+                    ListPage.blocked.delete(bid);
+                    return;
+                }
+                ListPage.blocked.add(bid);
+                if (!record.label?.isConnected) {
+                    const label = document.createElement("span");
+                    label.className = "qd-blocked-preview-label";
+                    label.textContent = "已屏蔽";
+                    link.before(label);
+                    record.label = label;
+                }
+                if (Category.isMissing(map[bid])) {
+                    updates[bid] = { ...updates[bid], ...Category.fromElements(item, layout) };
                 }
             });
-            Storage.fillCategories(categoryUpdates);
+            Storage.fillCategories(updates);
+            ListPage.renderSummary();
         },
-        // 条目出现后在同一轮渲染前处理，避免被屏蔽的书先显示再消失：
-        // - 页面解析期间条目是分段出现的（li 先于其中的书名链接），每批 DOM 变更都处理一次
-        // - 解析结束后只关心新增条目，例如 Pagetual 等无缝翻页脚本追加的下一页
-        watch: (onItemsChanged) => {
-            const itemSelector = SELECTORS.listLayouts.map((layout) => layout.item).join(", ");
-            const isItemNode = (node) => node.nodeType === Node.ELEMENT_NODE &&
-                (node.matches(itemSelector) || node.querySelector(itemSelector) !== null);
+        applyNew: (items) => {
+            const records = Array.from(items, ListPage.track).filter(Boolean);
+            if (records.length) ListPage.update(records, Storage.getMap());
+        },
+        applyChanges: (map, previous) => {
+            const { upsert, remove } = Sync.diff(previous ?? {}, map);
+            const records = [...upsert, ...remove].flatMap((bid) => [...(ListPage.byBid.get(bid) ?? [])]);
+            if (records.length) ListPage.update(records, map);
+        },
+
+        mountSummary: () => {
+            const root = document.querySelector(SELECTORS.listLayouts.map((layout) => layout.root).join(", "));
+            if (ListPage.summary?.root === root) return;
+            ListPage.summary?.toolbar.remove();
+            ListPage.summary = null;
+            if (!root) return;
+            const toolbar = document.createElement("div");
+            toolbar.className = "qd-hidden-summary";
+            const status = document.createElement("span");
+            status.setAttribute("role", "status");
+            const toggle = document.createElement("button");
+            toggle.type = "button";
+            toggle.className = "qd-list-action";
+            toggle.onclick = () => ListPage.setReveal(!ListPage.reveal);
+            toolbar.append(status, toggle);
+            document.body.append(toolbar);
+            ListPage.summary = { root, toolbar, status, toggle };
+            ListPage.renderSummary();
+        },
+        setReveal: (reveal) => {
+            ListPage.reveal = reveal;
+            ListPage.blocked.forEach((bid) => {
+                ListPage.byBid.get(bid).forEach(({ item }) => ListPage.setVisibility(item, true));
+            });
+            ListPage.renderSummary();
+        },
+        setVisibility: (item, blocked) => {
+            item.classList.toggle(HIDDEN_CLASS, blocked && !ListPage.reveal);
+            item.classList.toggle("qd-blocked-preview", blocked && ListPage.reveal);
+        },
+        renderSummary: () => {
+            if (!ListPage.summary) return;
+            const { toolbar, status, toggle } = ListPage.summary;
+            const count = ListPage.blocked.size;
+            toolbar.hidden = count === 0 && !ListPage.reveal;
+            const message = `${ListPage.reveal ? "临时显示已屏蔽作品" : "已隐藏"} ${count} 本`;
+            if (status.textContent !== message) status.textContent = message;
+            const action = ListPage.reveal ? "恢复隐藏" : "临时显示";
+            if (toggle.textContent !== action) toggle.textContent = action;
+        },
+
+        // 解析时书目可能分段插入，观察新增子树和已有书目内的变化。
+        watch: (onStructureChange) => {
+            const { itemSelector } = ListPage;
+            const structureSelector = [SELECTORS.pagination, ...SELECTORS.listLayouts.map((layout) => layout.root)].join(", ");
             new MutationObserver((mutations) => {
-                if (document.readyState === "loading" || CoverPager.view?.list.isConnected === false ||
-                    mutations.some((m) => Array.from(m.addedNodes).some(isItemNode))) {
-                    onItemsChanged();
+                const items = new Set();
+                let structureChanged = ListPage.summary?.root.isConnected === false || CoverPager.view?.list.isConnected === false;
+                for (const { target, addedNodes, removedNodes } of mutations) {
+                    const parentItem = target.closest?.(itemSelector);
+                    if (parentItem) items.add(parentItem);
+                    for (const node of addedNodes) {
+                        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+                        if (node.matches(itemSelector)) items.add(node);
+                        node.querySelectorAll(itemSelector).forEach((item) => items.add(item));
+                        structureChanged ||= node.matches(structureSelector) || !!node.querySelector(structureSelector);
+                    }
+                    for (const node of removedNodes) {
+                        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+                        const forgetIfDetached = (item) => {
+                            if (ListPage.byItem.has(item) && (!item.isConnected || !item.matches(itemSelector))) {
+                                ListPage.forget(item);
+                                structureChanged = true;
+                            }
+                        };
+                        forgetIfDetached(node);
+                        node.querySelectorAll("li, tr").forEach(forgetIfDetached);
+                    }
                 }
-            }).observe(document, { childList: true, subtree: true });
+                ListPage.applyNew(items);
+                if (structureChanged || items.size) onStructureChange();
+            }).observe(document, { childList: true, subtree: true, attributeFilter: ["data-bid"] });
         },
         // 书名和分区在点击时才读取：按钮可能在条目还没解析完整时就已创建
         createButton: (bid, link, item, layout) => {
@@ -793,11 +922,18 @@
             if (previous) {
                 previous.observer.disconnect();
                 previous.request?.abort();
+                previous.scrollRetry?.abort();
                 previous.footer.remove();
                 CoverPager.view = null;
             }
             if (!list) return;
-            const page = CoverPager.readPage(document, location.href);
+            let page;
+            try {
+                page = CoverPager.readPage(document, location.href);
+            } catch (err) {
+                console.warn("QidianBlocker Pagination Error:", err);
+                return;
+            }
             if (!page?.next) return;
 
             const footer = document.createElement("div");
@@ -806,16 +942,19 @@
             status.setAttribute("role", "status");
             const retry = document.createElement("button");
             retry.type = "button";
-            retry.className = "qd-list-retry";
+            retry.className = "qd-list-action";
             retry.textContent = "重试";
             retry.hidden = true;
-            footer.append(status, retry);
-            list.closest("#book-img-text").after(footer);
+            const openPage = document.createElement("a");
+            openPage.className = "qd-list-action";
+            openPage.hidden = true;
+            footer.append(status, retry, openPage);
+            list.closest(COVER_LAYOUT.root).after(footer);
 
             const observer = new IntersectionObserver((entries) => {
                 if (entries.some((entry) => entry.isIntersecting) && retry.hidden) CoverPager.load(view);
-            }, { rootMargin: "0px 0px 320px" });
-            const view = { list, footer, status, retry, observer, page, request: null };
+            }, { rootMargin: `0px 0px ${PAGE_LOAD_MARGIN}px` });
+            const view = { list, footer, status, retry, openPage, observer, page, request: null, scrollRetry: null, retryCount: 0 };
             CoverPager.view = view;
             retry.onclick = () => CoverPager.load(view);
             CoverPager.showProgress(view);
@@ -826,13 +965,48 @@
             view.status.textContent = `已加载到第 ${view.page.number} 页${message}`;
         },
 
+        waitForDownScroll: (view) => {
+            const controller = new AbortController();
+            view.scrollRetry = controller;
+            const readyAt = Date.now() + PAGE_SCROLL_RETRY_DELAY;
+            let lastY = window.scrollY;
+            const retry = () => {
+                if (view.request || CoverPager.view !== view || !view.list.isConnected || Date.now() < readyAt) return;
+                const { top, bottom } = view.footer.getBoundingClientRect();
+                if (bottom < 0 || top > window.innerHeight + PAGE_LOAD_MARGIN) return;
+                view.retryCount++;
+                CoverPager.load(view);
+            };
+            const options = { passive: true, signal: controller.signal };
+            // 滚轮到底时不会再改变 scrollY，继续向下滚动仍可触发重试。
+            window.addEventListener("wheel", (event) => {
+                if (event.deltaY > 0 && !event.ctrlKey) retry();
+            }, options);
+            window.addEventListener("scroll", () => {
+                const y = window.scrollY;
+                const down = y > lastY;
+                lastY = y;
+                if (down) retry();
+            }, options);
+        },
+
+        failureReason: (status, timedOut) => {
+            if (timedOut) return "请求超时";
+            if (status === 0) return "起点要求跳转";
+            if (status === 200) return "未找到下一页的图文书目";
+            if (status === 202) return "起点未返回完整页面（HTTP 202）";
+            if (status === 429) return "请求过于频繁（HTTP 429）";
+            return status ? `HTTP ${status}` : "网络请求失败";
+        },
+
         append: (list, items, baseUrl) => {
             const getBid = (item) => item.querySelector(COVER_LAYOUT.link)?.dataset.bid;
-            const seen = new Set(Array.from(list.children, getBid));
+            const seen = new Set();
             const fragment = document.createDocumentFragment();
             items.forEach((item) => {
                 const bid = getBid(item);
-                if (seen.has(bid)) return;
+                const existing = ListPage.byBid.get(bid);
+                if (seen.has(bid) || (existing && Array.from(existing).some(({ item }) => list.contains(item)))) return;
                 seen.add(bid);
                 const card = document.importNode(item, true);
                 card.querySelectorAll("script").forEach((script) => script.remove());
@@ -847,21 +1021,26 @@
 
         load: async (view) => {
             if (CoverPager.view !== view || !view.list.isConnected || view.request || !view.page.next) return;
+            view.scrollRetry?.abort();
+            view.scrollRetry = null;
             const request = new AbortController();
             const timer = setTimeout(() => request.abort(), PAGE_LOAD_TIMEOUT);
             const url = view.page.next;
             view.request = request;
             view.observer.disconnect();
             view.retry.hidden = true;
+            view.openPage.hidden = true;
             CoverPager.showProgress(view, " · 正在加载下一页…");
+            let httpStatus;
             try {
                 const response = await fetch(url, {
                     credentials: "same-origin",
                     mode: "same-origin",
-                    redirect: "error",
+                    redirect: "manual",
                     signal: request.signal
                 });
-                if (response.status !== 200) throw new Error(`起点返回 HTTP ${response.status}`);
+                httpStatus = response.status;
+                if (httpStatus !== 200) throw new Error(CoverPager.failureReason(httpStatus, false));
                 const source = new DOMParser().parseFromString(await response.text(), "text/html");
                 if (CoverPager.view !== view || !view.list.isConnected) return;
                 const page = CoverPager.readPage(source, url);
@@ -873,14 +1052,22 @@
 
                 CoverPager.append(view.list, items, url);
                 view.page = page;
+                view.retryCount = 0;
                 CoverPager.showProgress(view, page.next ? "" : " · 已到最后一页");
                 // 如果下一页的书全被屏蔽，底部仍在视野内，需要重新观察才能继续加载。
                 if (page.next) view.observer.observe(view.footer);
             } catch (err) {
                 if (CoverPager.view !== view || !view.list.isConnected) return;
                 console.warn("QidianBlocker Pagination Error:", err);
-                CoverPager.showProgress(view, " · 下一页加载失败");
+                const mayRetry = httpStatus === undefined || httpStatus === 408 || httpStatus >= 500 || request.signal.aborted;
+                const waitForScroll = mayRetry && view.retryCount < PAGE_SCROLL_RETRY_LIMIT;
+                const reason = CoverPager.failureReason(httpStatus, request.signal.aborted);
+                CoverPager.showProgress(view, ` · 下一页加载失败（${reason}）${waitForScroll ? " · 继续向下滚动可重试" : ""}`);
                 view.retry.hidden = false;
+                view.openPage.href = url;
+                view.openPage.textContent = `打开第 ${view.page.number + 1} 页`;
+                view.openPage.hidden = false;
+                if (waitForScroll) CoverPager.waitForDownScroll(view);
             } finally {
                 clearTimeout(timer);
                 view.request = null;
@@ -1261,20 +1448,30 @@
         const isListPage = PageType.isList();
         const coverPagerEnabled = isListPage && GM_getValue(COVER_PAGER_ENABLED_KEY, true);
         const detailBid = PageType.detailBid();
-        const applyPage = () => {
+        const applyDetail = () => {
+            if (!detailBid || document.readyState === "loading") return;
             try {
-                if (isListPage) {
-                    ListPage.apply();
-                    if (coverPagerEnabled && document.readyState !== "loading") CoverPager.mount();
-                }
-                // 同步可能在页面解析结束前就带来数据变化，这时详情页的按钮区还不存在
-                else if (detailBid && document.readyState !== "loading") DetailPage.apply(detailBid);
-            } catch (e) {
-                console.error("QidianBlocker Error:", e);
+                DetailPage.apply(detailBid);
+            } catch (err) {
+                console.error("QidianBlocker Error:", err);
+            }
+        };
+        const refreshListControls = () => {
+            if (document.readyState === "loading") return;
+            ListPage.mountSummary();
+            ListPage.renderSummary();
+            if (coverPagerEnabled) CoverPager.mount();
+        };
+        const applyInitialPage = () => {
+            if (isListPage) {
+                ListPage.applyNew(document.querySelectorAll(ListPage.itemSelector));
+                refreshListControls();
+            } else {
+                applyDetail();
             }
         };
 
-        Storage.onChange(applyPage);
+        Storage.onChange(isListPage ? ListPage.applyChanges : applyDetail);
         Storage.onChange(Panel.refresh);
         GM_addValueChangeListener(DATA_KEY, (name, oldValue, newValue, remote) => {
             if (remote && newValue) Storage.accept(newValue);
@@ -1288,9 +1485,9 @@
         }
 
         // 脚本在 document-start 注入：列表页边解析边处理，详情页的按钮区要等解析结束才存在
-        if (isListPage) ListPage.watch(applyPage);
-        if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", applyPage);
-        else applyPage();
+        if (isListPage) ListPage.watch(refreshListControls);
+        if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", applyInitialPage);
+        else applyInitialPage();
 
         // 同步：打开页面、切回页面时检查远端；切走页面时把还没上传的改动立即传上去
         Sync.onChange(Panel.refreshSync);
