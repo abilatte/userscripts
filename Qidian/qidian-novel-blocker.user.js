@@ -2,7 +2,7 @@
 // @name         起点小说屏蔽工具
 // @name:en      Qidian Novel Blocker
 // @namespace    abilatte
-// @version      2.3
+// @version      2.4
 // @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
 // @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
 // @author       abilatte
@@ -28,12 +28,15 @@
 
     // --- 1. 配置 ---
     const STORAGE_KEY = "qidian_blocked_map_v5";
+    const DATA_KEY = "qidian_sync_config"; // 原地迁移，避免在旧存储键里留下另一份令牌
+    const STORAGE_LOCK = "abilatte:qidian-blocker:storage";
+    const SYNC_LOCK = "abilatte:qidian-blocker:sync";
+    const STORAGE_WAIT_TIMEOUT = 5000;
     const BID_PATTERN = /^\d+$/;
     const HIDDEN_CLASS = "qd-hidden";
     const TOAST_DURATION = 6000;
 
     // GitHub 同步
-    const SYNC_CONFIG_KEY = "qidian_sync_config";
     const SYNC_STATE_KEY = "qidian_sync_state";
     const SYNC_API = "https://api.github.com";
     const SYNC_DEFAULT_PATH = "qidian/blocklist.json";
@@ -156,7 +159,7 @@
     };
 
     const Storage = {
-        _cache: null,
+        _data: null,
         _listeners: [],
 
         normalizeEntry: (value) => {
@@ -191,62 +194,116 @@
             return { map, skipped };
         },
 
-        getMap: () => {
-            if (!Storage._cache) Storage._cache = Storage.normalize(GM_getValue(STORAGE_KEY, {})).map;
-            return Storage._cache;
+        read: () => {
+            const saved = GM_getValue(DATA_KEY, null);
+            const cached = Storage._data;
+            if (cached?.revision > 0 && !(saved?.revision > cached.revision)) return cached;
+            if (saved?.revision > 0) return saved;
+            return {
+                revision: 0,
+                mapRevision: 0,
+                configRevision: 0,
+                map: Storage.normalize(GM_getValue(STORAGE_KEY, {})).map,
+                config: saved?.repo && saved.path && saved.token ? saved : null,
+                sync: { ...Sync.emptyState(), ...GM_getValue(SYNC_STATE_KEY, {}) }
+            };
         },
-        // fromSync 表示数据来自远端合并，不是用户在本机的改动，不记入待上传的改动
-        saveMap: (map, { fromSync = false } = {}) => {
-            const previous = Storage.getMap();
-            GM_setValue(STORAGE_KEY, map);
-            Storage._cache = map;
-            if (!fromSync) Sync.journal(previous, map);
-            Storage._emit();
+        getData: () => Storage._data ??= Storage.read(),
+        getMap: () => Storage.getData().map,
+        accept: (data) => {
+            const previous = Storage._data;
+            if (previous && data.revision <= previous.revision) return;
+            Storage._data = data;
+            Sync.onDataChange(data);
+            if (!previous || data.mapRevision !== previous.mapRevision) {
+                Storage._listeners.forEach((fn) => fn());
+            }
         },
-        // 其他标签页修改了数据
-        syncFromRemote: (rawMap) => {
-            Storage._cache = Storage.normalize(rawMap).map;
-            Storage._emit();
+        transact: async (edit) => {
+            let result;
+            await navigator.locks.request(STORAGE_LOCK, async () => {
+                // GM_getValue 读的是标签页缓存。锁内还要等它收到上一笔提交。
+                // 起点的 localStorage 只保存版本号，数据和令牌都留在 GM 存储里。
+                const revision = Number(localStorage.getItem(STORAGE_LOCK));
+                const deadline = Date.now() + STORAGE_WAIT_TIMEOUT;
+                let current = Storage.read();
+                while (current.revision < revision) {
+                    if (Date.now() >= deadline) throw new Error("未能读取其他标签页刚保存的数据，请稍后重试");
+                    await new Promise((resolve) => setTimeout(resolve, 25));
+                    current = Storage.read();
+                }
+                Storage.accept(current);
+                const next = { ...current };
+                result = edit(next);
+                if (next.map === current.map && next.config === current.config && next.sync === current.sync) return;
+                next.revision++;
+                if (next.map !== current.map) next.mapRevision++;
+                localStorage.setItem(STORAGE_LOCK, String(next.revision));
+                try {
+                    GM_setValue(DATA_KEY, next);
+                } catch (err) {
+                    localStorage.setItem(STORAGE_LOCK, String(current.revision));
+                    throw err;
+                }
+                Storage.accept(next);
+            });
+            return result;
+        },
+        changeMap: async (edit) => {
+            const { changed, result } = await Storage.transact((data) => {
+                const map = { ...data.map };
+                const result = edit(map);
+                const changes = Sync.diff(data.map, map);
+                const changed = Sync.hasPending(changes);
+                if (changed) {
+                    data.map = map;
+                    if (data.config) data.sync = Sync.journal(data.sync, changes);
+                }
+                return { changed: changed && !!data.config, result };
+            });
+            if (changed) Sync.schedule();
+            return result;
         },
         onChange: (fn) => Storage._listeners.push(fn),
-        _emit: () => Storage._listeners.forEach((fn) => fn()),
+        reportError: (err) => {
+            console.error("QidianBlocker Storage Error:", err);
+            alert(`屏蔽列表操作失败：${err.message}`);
+        },
 
         has: (bid) => hasOwn(Storage.getMap(), bid),
         add: (bid, title, category) => {
             if (!BID_PATTERN.test(bid) || !title) throw new Error(`invalid book: ${bid} ${title}`);
-            Storage.saveMap({ ...Storage.getMap(), [bid]: { title: title, time: Date.now(), ...category } });
-        },
-        // 只补缺失的分区字段，已有的不覆盖；没有变化时不写存储，避免 onChange 循环
-        fillCategories: (updates) => {
-            const map = { ...Storage.getMap() };
-            let changed = false;
-            Object.keys(updates).forEach((bid) => {
-                const entry = map[bid];
-                if (!entry) return;
-                const next = { ...updates[bid], ...entry };
-                if (next.category !== entry.category || next.subCategory !== entry.subCategory) {
-                    map[bid] = next;
-                    changed = true;
-                }
+            return Storage.changeMap((map) => {
+                map[bid] = { title: title, time: Date.now(), ...category };
             });
-            if (changed) Storage.saveMap(map);
         },
-        remove: (bids) => {
-            const map = { ...Storage.getMap() };
+        // 只补缺失的分区字段，已有的不覆盖
+        fillCategories: (updates) => {
+            const entries = Object.entries(updates).filter(([, category]) => category.category || category.subCategory);
+            if (!entries.length) return;
+            Storage.changeMap((map) => {
+                entries.forEach(([bid, category]) => {
+                    if (hasOwn(map, bid)) map[bid] = { ...category, ...map[bid] };
+                });
+            }).catch((err) => console.error("QidianBlocker Category Error:", err));
+        },
+        remove: (bids) => Storage.changeMap((map) => {
             bids.forEach((bid) => delete map[bid]);
-            Storage.saveMap(map);
-        },
-        clear: () => Storage.saveMap({}),
+        }),
+        clear: () => Storage.changeMap((map) => {
+            Object.keys(map).forEach((bid) => delete map[bid]);
+        }),
+        toggle: (bid, readEntry) => Storage.changeMap((map) => {
+            if (hasOwn(map, bid)) delete map[bid];
+            else map[bid] = readEntry();
+        }),
         // 合并导入数据，同 ID 以导入数据为准；导入数据没有的分区字段保留现有值
-        merge: (incoming) => {
-            const current = Storage.getMap();
+        merge: (incoming) => Storage.changeMap((map) => {
             const bids = Object.keys(incoming);
-            const overwritten = bids.filter((bid) => hasOwn(current, bid)).length;
-            const merged = { ...current };
-            bids.forEach((bid) => { merged[bid] = { ...current[bid], ...incoming[bid] }; });
-            Storage.saveMap(merged);
+            const overwritten = bids.filter((bid) => hasOwn(map, bid)).length;
+            bids.forEach((bid) => { map[bid] = { ...map[bid], ...incoming[bid] }; });
             return { added: bids.length - overwritten, overwritten };
-        }
+        })
     };
 
     // --- 4. 导入导出 ---
@@ -278,11 +335,11 @@
                 if (file) file.text().then(Transfer.importText, (err) => {
                     console.error("QidianBlocker Import Error:", err);
                     alert("文件读取失败，请重新选择文件。");
-                });
+                }).catch(Storage.reportError);
             };
             input.click();
         },
-        importText: (text) => {
+        importText: async (text) => {
             let raw;
             try {
                 raw = JSON.parse(text);
@@ -301,7 +358,7 @@
                 alert(`未发现有效记录，已跳过 ${skipped} 条。`);
                 return;
             }
-            const { added, overwritten } = Storage.merge(map);
+            const { added, overwritten } = await Storage.merge(map);
             alert(`导入完成：新增 ${added} 条，覆盖 ${overwritten} 条，跳过 ${skipped} 条无效记录。`);
         }
     };
@@ -327,77 +384,76 @@
     };
 
     const Sync = {
-        _running: false,
+        _active: null,
         _timer: 0,
         _listeners: [],
 
-        // 配置：{ repo: "用户名/仓库名", path, token }
-        getConfig: () => {
-            const config = GM_getValue(SYNC_CONFIG_KEY, null);
-            return config && config.repo && config.path && config.token ? config : null;
-        },
-        saveConfig: (config) => {
-            const current = Sync.getConfig();
-            GM_setValue(SYNC_CONFIG_KEY, config);
+        getConfig: () => Storage.getData().config,
+        saveConfig: (config) => Storage.transact((data) => {
+            const current = data.config;
+            const token = config.token || current?.token;
+            if (!token) throw new Error("请填写 GitHub 令牌");
+            data.config = { ...config, token };
+            data.configRevision++;
             // 换了同步位置后，旧的 sha 和改动记录不再适用，下次按首次同步处理
-            if (!current || current.repo !== config.repo || current.path !== config.path) GM_setValue(SYNC_STATE_KEY, {});
-            Sync._emit();
-        },
-        clearConfig: () => {
-            GM_setValue(SYNC_CONFIG_KEY, null);
-            GM_setValue(SYNC_STATE_KEY, {});
-            Sync._emit();
-        },
+            if (!current || current.repo !== config.repo || current.path !== config.path) data.sync = Sync.emptyState();
+        }),
+        clearConfig: () => Storage.transact((data) => {
+            if (!data.config) return;
+            data.config = null;
+            data.configRevision++;
+            data.sync = Sync.emptyState();
+        }),
 
-        // 状态：sha 为上次同步时远端文件的版本，null 表示从未同步；upsert / remove 为之后本机改动过的书籍 ID
-        getState: () => ({
+        // sha 是待上传改动所基于的远端版本，null 表示尚未建立基线。
+        emptyState: () => ({
             sha: null,
             upsert: [],
             remove: [],
             lastSyncTime: 0,
             lastCheckTime: 0,
-            lastError: "",
-            ...GM_getValue(SYNC_STATE_KEY, {})
+            lastError: ""
         }),
-        // 状态可能被其他标签页或请求期间的本地改动更新，每次都基于最新值修改
-        updateState: (patch) => {
-            GM_setValue(SYNC_STATE_KEY, { ...Sync.getState(), ...patch });
+        onDataChange: (data) => {
+            const active = Sync._active;
+            if (active && data.configRevision !== active.configRevision) active.controller.abort();
             Sync._emit();
         },
+        // 在重新读取配置的锁内校验，避免其他标签页的配置通知尚未送达。
+        transact: (active, edit) => Storage.transact((data) => {
+            if (data.configRevision !== active.configRevision) active.controller.abort();
+            active.controller.signal.throwIfAborted();
+            return edit(data);
+        }),
         onChange: (fn) => Sync._listeners.push(fn),
         _emit: () => Sync._listeners.forEach((fn) => fn()),
 
-        isBusy: () => Sync._running,
+        isBusy: () => Sync._active !== null,
         describe: () => {
             if (!Sync.getConfig()) return "☁️ 同步未启用";
             if (Sync.isBusy()) return "☁️ 正在同步…";
-            const state = Sync.getState();
+            const state = Storage.getData().sync;
             if (state.lastError) return `⚠️ 同步失败：${state.lastError}`;
-            if (state.upsert.length || state.remove.length) return "☁️ 有改动等待上传";
+            if (Sync.hasPending(state)) return "☁️ 有改动等待上传";
             return state.lastSyncTime ? `☁️ 已同步 · ${formatDate(state.lastSyncTime)}` : "☁️ 尚未同步";
         },
 
         // 两份数据之间的差异：{ upsert: 新增或内容变化的 ID, remove: 被移除的 ID }
         diff: (oldMap, newMap) => {
-            const same = (a, b) => a === b || JSON.stringify(a) === JSON.stringify(b);
+            const same = (a, b) => a === b || (a.title === b.title && a.time === b.time &&
+                a.category === b.category && a.subCategory === b.subCategory);
             return {
                 upsert: Object.keys(newMap).filter((bid) => !hasOwn(oldMap, bid) || !same(oldMap[bid], newMap[bid])),
                 remove: Object.keys(oldMap).filter((bid) => !hasOwn(newMap, bid))
             };
         },
-        // 本机每次改动后调用。从未同步过时不需要记录，首次同步会把本机和远端整体合并
-        journal: (oldMap, newMap) => {
-            if (!Sync.getConfig()) return;
-            const state = Sync.getState();
-            if (state.sha !== null) {
-                const changes = Sync.diff(oldMap, newMap);
-                const upsert = new Set(state.upsert);
-                const remove = new Set(state.remove);
-                changes.upsert.forEach((bid) => { upsert.add(bid); remove.delete(bid); });
-                changes.remove.forEach((bid) => { remove.add(bid); upsert.delete(bid); });
-                Sync.updateState({ upsert: Array.from(upsert), remove: Array.from(remove) });
-            }
-            Sync.schedule();
+        hasPending: (state) => state.upsert.length > 0 || state.remove.length > 0,
+        journal: (state, changes) => {
+            const upsert = new Set(state.upsert);
+            const remove = new Set(state.remove);
+            changes.upsert.forEach((bid) => { upsert.add(bid); remove.delete(bid); });
+            changes.remove.forEach((bid) => { remove.add(bid); upsert.delete(bid); });
+            return { ...state, upsert: Array.from(upsert), remove: Array.from(remove) };
         },
         schedule: () => {
             clearTimeout(Sync._timer);
@@ -411,26 +467,43 @@
             return lines.length ? `{\n${lines.join(",\n")}\n}\n` : "{}\n";
         },
 
-        request: (config, method, path, body) => new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method: method,
-                url: SYNC_API + path,
-                headers: {
-                    "Accept": "application/vnd.github+json",
-                    "Authorization": `Bearer ${config.token}`,
-                    "X-GitHub-Api-Version": "2022-11-28",
-                    ...(body ? { "Content-Type": "application/json" } : {})
-                },
-                data: body ? JSON.stringify(body) : undefined,
-                timeout: SYNC_TIMEOUT,
-                anonymous: true,
-                nocache: true,
-                onload: resolve,
-                onerror: () => reject(new Error("无法连接 GitHub，请检查网络或代理")),
-                onabort: () => reject(new Error("请求被中断")),
-                ontimeout: () => reject(new Error("连接 GitHub 超时"))
+        request: async (active, method, path, body) => {
+            const { pending } = await Sync.transact(active, () => ({
+                // 锁内发起请求，锁外等待响应。请求期间仍可编辑书单或切换配置。
+                pending: Sync.send(active, method, path, body)
+            }));
+            return pending;
+        },
+        send: (active, method, path, body) => {
+            const signal = active.controller.signal;
+            let abort;
+            const pending = new Promise((resolve, reject) => {
+                const request = GM_xmlhttpRequest({
+                    method: method,
+                    url: SYNC_API + path,
+                    headers: {
+                        "Accept": "application/vnd.github+json",
+                        "Authorization": `Bearer ${active.config.token}`,
+                        "X-GitHub-Api-Version": "2022-11-28",
+                        ...(body ? { "Content-Type": "application/json" } : {})
+                    },
+                    data: body ? JSON.stringify(body) : undefined,
+                    timeout: SYNC_TIMEOUT,
+                    anonymous: true,
+                    nocache: true,
+                    onload: resolve,
+                    onerror: () => reject(new Error("无法连接 GitHub，请检查网络或代理")),
+                    onabort: () => reject(new Error("请求被中断")),
+                    ontimeout: () => reject(new Error("连接 GitHub 超时"))
+                });
+                abort = () => {
+                    reject(signal.reason);
+                    request.abort();
+                };
+                signal.addEventListener("abort", abort, { once: true });
             });
-        }),
+            return pending.finally(() => signal.removeEventListener("abort", abort));
+        },
         assertOk: (res) => {
             if (res.status >= 200 && res.status < 300) return;
             const reasons = {
@@ -443,9 +516,10 @@
         contentsPath: (config) => `/repos/${config.repo}/contents/${config.path.split("/").map(encodeURIComponent).join("/")}`,
 
         // 返回 { sha, map }；文件还不存在时返回 null
-        fetchRemote: async (config) => {
+        fetchRemote: async (active) => {
+            const { config } = active;
             // GitHub 的响应带 max-age=60，不加时间戳可能读到刚上传之前的旧版本
-            const res = await Sync.request(config, "GET", `${Sync.contentsPath(config)}?t=${Date.now()}`);
+            const res = await Sync.request(active, "GET", `${Sync.contentsPath(config)}?t=${Date.now()}`);
             if (res.status === 404) return null;
             Sync.assertOk(res);
             const meta = JSON.parse(res.responseText);
@@ -454,7 +528,7 @@
             let content = meta.content;
             if (meta.encoding !== "base64" || !content) {
                 // 超过 1MB 的文件不随元数据返回内容
-                const blobRes = await Sync.request(config, "GET", `/repos/${config.repo}/git/blobs/${meta.sha}`);
+                const blobRes = await Sync.request(active, "GET", `/repos/${config.repo}/git/blobs/${meta.sha}`);
                 Sync.assertOk(blobRes);
                 content = JSON.parse(blobRes.responseText).content;
             }
@@ -472,8 +546,8 @@
             return { sha: meta.sha, map: Storage.normalize(raw).map };
         },
         // 返回 { sha }；远端在读取之后又被改动时返回 { conflict: true }
-        pushRemote: async (config, text, count, sha) => {
-            const res = await Sync.request(config, "PUT", Sync.contentsPath(config), {
+        pushRemote: async (active, text, count, sha) => {
+            const res = await Sync.request(active, "PUT", Sync.contentsPath(active.config), {
                 message: `sync: ${count} books`,
                 content: Base64.encode(text),
                 ...(sha ? { sha: sha } : {})
@@ -485,81 +559,91 @@
         },
 
         // 把远端的新内容合并进本机
-        mergeRemote: (remote) => {
-            const state = Sync.getState();
+        mergeRemote: (data, remote) => {
+            const state = data.sync;
             if (remote.sha === state.sha) return;
 
-            const local = Storage.getMap();
-            let merged;
+            const local = data.map;
+            const merged = { ...remote.map };
             if (state.sha === null) {
                 // 首次同步：两边的记录都保留，同一本书合并字段
-                merged = { ...remote.map };
                 Object.keys(local).forEach((bid) => { merged[bid] = { ...remote.map[bid], ...local[bid] }; });
             } else {
-                merged = { ...remote.map };
                 state.upsert.forEach((bid) => { if (hasOwn(local, bid)) merged[bid] = local[bid]; });
-                state.remove.forEach((bid) => delete merged[bid]);
             }
-            Storage.saveMap(merged, { fromSync: true });
-            Sync.updateState({ sha: remote.sha });
+            state.remove.forEach((bid) => delete merged[bid]);
+            // 首次合并带入的本地记录也要进入待上传记录，冲突重试才能继续保留它们。
+            data.map = merged;
+            data.sync = { ...state, ...Sync.diff(remote.map, merged), sha: remote.sha };
         },
         // 本机的 uploaded 这份数据已与远端一致；请求期间又发生的本地改动留到下一次上传
-        settle: (uploaded, sha) => {
-            const changes = Sync.diff(uploaded, Storage.getMap());
-            Sync.updateState({ sha: sha, upsert: changes.upsert, remove: changes.remove });
-            if (changes.upsert.length || changes.remove.length) Sync.schedule();
+        settle: async (active, uploaded, sha) => {
+            const pending = await Sync.transact(active, (data) => {
+                const changes = Sync.diff(uploaded, data.map);
+                const now = Date.now();
+                data.sync = { ...changes, sha, lastCheckTime: now, lastSyncTime: now, lastError: "" };
+                return Sync.hasPending(changes);
+            });
+            if (pending) Sync.schedule();
         },
-        syncOnce: async (config, attempt = 0) => {
-            const remote = await Sync.fetchRemote(config);
-            if (remote) Sync.mergeRemote(remote);
-
-            const local = Storage.getMap();
+        syncOnce: async (active, attempt = 0) => {
+            const remote = await Sync.fetchRemote(active);
+            const local = await Sync.transact(active, (data) => {
+                if (remote) Sync.mergeRemote(data, remote);
+                return data.map;
+            });
             const text = Sync.serialize(local);
             if (remote && text === Sync.serialize(remote.map)) {
-                Sync.settle(local, remote.sha);
+                await Sync.settle(active, local, remote.sha);
                 return;
             }
 
-            const result = await Sync.pushRemote(config, text, Object.keys(local).length, remote ? remote.sha : null);
+            const result = await Sync.pushRemote(active, text, Object.keys(local).length, remote ? remote.sha : null);
             if (result.conflict) {
-                if (attempt >= SYNC_MAX_CONFLICT_RETRIES) throw new Error("远端数据正在被其他设备修改，稍后会自动重试");
-                await Sync.syncOnce(config, attempt + 1);
+                if (attempt >= SYNC_MAX_CONFLICT_RETRIES) {
+                    throw new Error("远端数据正在被其他设备修改，请稍后重试");
+                }
+                await Sync.syncOnce(active, attempt + 1);
                 return;
             }
-            Sync.settle(local, result.sha);
+            await Sync.settle(active, local, result.sha);
         },
 
         // force：忽略检查间隔；pushOnly：只在有改动等待上传时才同步。
         // 同步失败不影响屏蔽功能，错误显示在管理面板里。
-        // 「正在同步」只是当前页面的内存状态，不写进存储：页面可能在请求中途被刷新或关闭，
-        // 写进存储的标记会留下来挡住之后的页面。多个标签页同时同步是安全的，冲突由 sha 检查兜底
+        // 同设备的标签页依次同步，跨设备写入仍由 GitHub SHA 处理冲突。
         run: async ({ force = false, pushOnly = false } = {}) => {
-            const config = Sync.getConfig();
-            if (!config || Sync._running) return;
-
-            const state = Sync.getState();
-            const hasPending = state.upsert.length > 0 || state.remove.length > 0;
-            if (pushOnly && !hasPending) return;
-            const checkedRecently = Date.now() - state.lastCheckTime < SYNC_PULL_INTERVAL;
-            if (!force && !hasPending && state.sha !== null && checkedRecently) return;
-
-            Sync._running = true;
-            clearTimeout(Sync._timer);
-            Sync._emit();
-            let lastError = "";
             try {
-                await Sync.syncOnce(config);
+                await navigator.locks.request(SYNC_LOCK, async () => {
+                    const active = await Storage.transact(({ config, configRevision, sync }) => {
+                        if (!config) return null;
+                        const pending = Sync.hasPending(sync);
+                        const checkedRecently = Date.now() - sync.lastCheckTime < SYNC_PULL_INTERVAL;
+                        if (pushOnly && !pending) return null;
+                        if (!force && !pending && sync.sha !== null && checkedRecently) return null;
+                        return { config, configRevision, controller: new AbortController() };
+                    });
+                    if (!active) return;
+
+                    Sync._active = active;
+                    clearTimeout(Sync._timer);
+                    Sync._emit();
+                    try {
+                        await Sync.syncOnce(active);
+                    } catch (err) {
+                        if (active.controller.signal.aborted) return;
+                        await Sync.transact(active, (data) => {
+                            data.sync = { ...data.sync, lastCheckTime: Date.now(), lastError: err.message };
+                        });
+                        console.error("QidianBlocker Sync Error:", err);
+                    } finally {
+                        Sync._active = null;
+                        Sync._emit();
+                    }
+                });
             } catch (err) {
-                console.error("QidianBlocker Sync Error:", err);
-                lastError = err.message;
+                if (err.name !== "AbortError") console.error("QidianBlocker Sync Error:", err);
             }
-            Sync._running = false;
-            const finishedAt = Date.now();
-            Sync.updateState({
-                lastCheckTime: finishedAt,
-                lastError: lastError,
-                ...(lastError ? {} : { lastSyncTime: finishedAt })
-            });
         }
     };
 
@@ -649,7 +733,7 @@
             btn.className = "qd-block-btn";
             btn.textContent = "🚫";
             btn.title = "屏蔽此书";
-            btn.addEventListener("click", (e) => {
+            btn.addEventListener("click", async (e) => {
                 e.preventDefault();
                 e.stopPropagation();
                 const title = (link.getAttribute("title") || link.textContent).trim();
@@ -657,8 +741,12 @@
                     alert("未能读取书名，屏蔽失败。");
                     return;
                 }
-                Storage.add(bid, title, Category.fromElements(item, layout));
-                Toast.show(`已屏蔽《${title}》`, "撤销", () => Storage.remove([bid]));
+                try {
+                    await Storage.add(bid, title, Category.fromElements(item, layout));
+                    Toast.show(`已屏蔽《${title}》`, "撤销", () => Storage.remove([bid]).catch(Storage.reportError));
+                } catch (err) {
+                    Storage.reportError(err);
+                }
             });
             return btn;
         }
@@ -678,7 +766,7 @@
                 btn.id = "qd-detail-btn";
                 btn.type = "button";
                 btn.className = "qd-detail-btn";
-                btn.addEventListener("click", () => DetailPage.toggle(bid));
+                btn.addEventListener("click", () => DetailPage.toggle(bid).catch(Storage.reportError));
                 group.appendChild(btn);
             }
 
@@ -690,19 +778,12 @@
                 Storage.fillCategories({ [bid]: Category.fromElements(document, SELECTORS.detailCategory) });
             }
         },
-        toggle: (bid) => {
-            if (Storage.has(bid)) {
-                Storage.remove([bid]);
-                return;
-            }
+        toggle: (bid) => Storage.toggle(bid, () => {
             const titleEl = document.querySelector(SELECTORS.detailTitle);
             const title = titleEl ? titleEl.textContent.trim() : "";
-            if (!title) {
-                alert("未能读取书名，屏蔽失败。");
-                return;
-            }
-            Storage.add(bid, title, Category.fromElements(document, SELECTORS.detailCategory));
-        }
+            if (!title) throw new Error("未能读取书名");
+            return { title, time: Date.now(), ...Category.fromElements(document, SELECTORS.detailCategory) };
+        })
     };
 
     // --- 9. 管理面板 ---
@@ -820,7 +901,7 @@
             };
             els.batchDel.onclick = () => {
                 const ids = Array.from(Panel.state.selectedIds);
-                if (ids.length && confirm(`确认要移除选中的 ${ids.length} 本书吗？`)) Storage.remove(ids);
+                if (ids.length && confirm(`确认要移除选中的 ${ids.length} 本书吗？`)) Storage.remove(ids).catch(Storage.reportError);
             };
 
             const syncConfig = Sync.getConfig();
@@ -828,15 +909,15 @@
             els.syncPath.value = syncConfig ? syncConfig.path : SYNC_DEFAULT_PATH;
             els.syncSettings.onclick = () => { els.syncForm.hidden = !els.syncForm.hidden; };
             els.syncNow.onclick = () => Sync.run({ force: true });
-            els.syncSave.onclick = Panel.saveSync;
+            els.syncSave.onclick = () => Panel.saveSync().catch(Storage.reportError);
             els.syncDisable.onclick = () => {
-                if (confirm("确认停用同步吗？\n本机和 GitHub 上的屏蔽列表都会保留，只是不再互相同步。")) Sync.clearConfig();
+                if (confirm("确认停用同步吗？\n本机和 GitHub 上的屏蔽列表都会保留，只是不再互相同步。")) Sync.clearConfig().catch(Storage.reportError);
             };
 
             els.import.onclick = Transfer.importFile;
             els.export.onclick = Transfer.exportFile;
             els.clear.onclick = () => {
-                if (confirm("⚠️ 确认要清空所有屏蔽记录吗？\n此操作不可恢复，建议先导出备份。")) Storage.clear();
+                if (confirm("⚠️ 确认要清空所有屏蔽记录吗？\n此操作不可恢复，建议先导出备份。")) Storage.clear().catch(Storage.reportError);
             };
 
             els.close.onclick = Panel.close;
@@ -877,13 +958,12 @@
         },
 
         // 令牌只保存在脚本管理器的存储里，不会回填到输入框
-        saveSync: () => {
+        saveSync: async () => {
             const { els } = Panel;
-            const current = Sync.getConfig();
             const config = {
                 repo: els.syncRepo.value.trim(),
                 path: els.syncPath.value.trim().replace(/^\/+/, ""),
-                token: els.syncToken.value.trim() || (current ? current.token : "")
+                token: els.syncToken.value.trim()
             };
             if (!SYNC_REPO_PATTERN.test(config.repo)) {
                 alert("仓库格式应为「用户名/仓库名」。");
@@ -893,11 +973,7 @@
                 alert("请填写文件路径。");
                 return;
             }
-            if (!config.token) {
-                alert("请填写 GitHub 令牌。");
-                return;
-            }
-            Sync.saveConfig(config);
+            await Sync.saveConfig(config);
             els.syncToken.value = "";
             els.syncForm.hidden = true;
             Sync.run({ force: true });
@@ -1023,7 +1099,7 @@
             removeBtn.className = "qd-btn";
             removeBtn.textContent = "移除";
             removeBtn.onclick = () => {
-                if (confirm(`确认移除《${item.title}》吗？`)) Storage.remove([item.bid]);
+                if (confirm(`确认移除《${item.title}》吗？`)) Storage.remove([item.bid]).catch(Storage.reportError);
             };
 
             row.append(checkbox, info, removeBtn);
@@ -1059,8 +1135,8 @@
 
         Storage.onChange(applyPage);
         Storage.onChange(Panel.refresh);
-        GM_addValueChangeListener(STORAGE_KEY, (name, oldValue, newValue, remote) => {
-            if (remote) Storage.syncFromRemote(newValue);
+        GM_addValueChangeListener(DATA_KEY, (name, oldValue, newValue, remote) => {
+            if (remote && newValue) Storage.accept(newValue);
         });
         GM_registerMenuCommand("⚙️ 管理屏蔽列表", Panel.open);
 
@@ -1071,11 +1147,6 @@
 
         // 同步：打开页面、切回页面时检查远端；切走页面时把还没上传的改动立即传上去
         Sync.onChange(Panel.refreshSync);
-        [SYNC_CONFIG_KEY, SYNC_STATE_KEY].forEach((key) => {
-            GM_addValueChangeListener(key, (name, oldValue, newValue, remote) => {
-                if (remote) Sync._emit();
-            });
-        });
         // 页面刷新或关闭时也会触发 hidden，这时只上传、不为了拉取而发请求
         document.addEventListener("visibilitychange", () => Sync.run({ pushOnly: document.visibilityState === "hidden" }));
         Sync.run();
