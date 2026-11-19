@@ -52,6 +52,23 @@
 
 之后脚本会在打开或切回页面时拉取最新列表，在本机有改动后约 30 秒自动上传。两台设备各自的新增和取消屏蔽都会保留。令牌只保存在脚本管理器的本地存储中。
 
+## 本地开发
+
+使用 Node.js 24 或更新版本，在本目录运行：
+
+```sh
+npm ci
+npm run build
+npm test
+npm run check:build
+```
+
+- `src/core/` 保存书单数据、跨标签页存储和 GitHub 同步逻辑。
+- `src/pages/` 保存起点列表、图文翻页和详情页逻辑。站点选择器集中在 `src/config.mjs`。
+- `src/ui/` 保存管理面板、导入导出、提示条和样式。脚本头部在 `src/userscript.meta.txt`。
+
+修改源码后运行 `npm run build`，将生成的 `qidian-novel-blocker.user.js` 与源码一起提交。Tampermonkey 继续从原地址安装或更新这个单文件。`npm run check:build` 可以检查产物是否与源码一致。
+
 ## 界面截图
 
 ### 全部作品页

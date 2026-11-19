@@ -1,0 +1,24 @@
+// ==UserScript==
+// @name         起点小说屏蔽工具
+// @name:en      Qidian Novel Blocker
+// @namespace    abilatte
+// @version      2.7
+// @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
+// @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
+// @author       abilatte
+// @match        https://www.qidian.com/all*
+// @match        https://www.qidian.com/book/*
+// @noframes
+// @run-at       document-start
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_registerMenuCommand
+// @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      api.github.com
+// @license      AGPL-3.0-or-later
+// @homepageURL  https://github.com/abilatte/userscripts
+// @updateURL    https://raw.githubusercontent.com/abilatte/userscripts/main/Qidian/qidian-novel-blocker.user.js
+// @downloadURL  https://raw.githubusercontent.com/abilatte/userscripts/main/Qidian/qidian-novel-blocker.user.js
+// ==/UserScript==

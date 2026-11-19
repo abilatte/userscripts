@@ -1,0 +1,74 @@
+.qd-hidden { display: none !important; }
+
+/* 原站为 float 两列布局，条目隐藏后会错位，改为 flex 换行 */
+#book-img-text .all-img-list { display: flex !important; flex-wrap: wrap; }
+#book-img-text .all-img-list > li { float: none !important; }
+/* 非书籍条目（如无缝翻页脚本插入的分页条）原本靠 clear: both 换行，flex 下改为独占一行。
+   用 :has 而不是脚本添加的 class 判断，条目在脚本处理前就能按两列排布 */
+#book-img-text .all-img-list > :not(:has(.book-mid-info)) { flex-basis: 100%; }
+
+/* 原站用上边框分隔各行，并靠 li:first-child 和 li:first-child + li 去掉首行的上边框。
+   隐藏条目或插入分页条后「首行」不再固定，改为每个条目统一用下边框分隔，同一行的条目始终等高 */
+#book-img-text .all-img-list > li:has(.book-mid-info) { border-top: none; padding-top: 0; border-bottom: 1px solid #e6e6e6; margin-bottom: 25px; }
+.qd-list-pager, .qd-hidden-summary { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; color: #666; font-size: 13px; }
+.qd-list-pager { min-height: 36px; padding: 4px 0; }
+.qd-hidden-summary { position: fixed; top: clamp(64px, 18vh, 180px); right: 16px; z-index: 4; max-width: calc(100vw - 32px); box-sizing: border-box; padding: 4px 10px; border: 1px solid #e6e6e6; border-radius: 4px; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08); }
+.qd-list-action { padding: 2px 6px; border: 0; background: none; color: #0060a8; cursor: pointer; }
+.qd-list-action[hidden], .qd-hidden-summary[hidden] { display: none; }
+.qd-blocked-preview .qd-block-btn { display: none; }
+.qd-blocked-preview-label { display: none; float: right; margin: 0 0 0 6px; color: #a13c35; font-size: 12px; }
+.qd-blocked-preview .qd-blocked-preview-label { display: inline; }
+
+/* 列表页屏蔽按钮：插在书名链接前并右浮动，文字模式的 a.name 是 block，放在后面会换行 */
+.qd-block-btn { float: right; margin: 2px 0 0 4px; cursor: pointer; font-size: 15px; line-height: 1; opacity: 0.5; transition: opacity 0.2s, transform 0.2s; user-select: none; }
+.qd-block-btn:hover { opacity: 1; transform: scale(1.2); }
+
+/* 详情页按钮（尺寸对齐站内 .blue-btn-detail） */
+.qd-detail-btn { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; margin-right: 12px; padding: 0; border: 1px solid #e0e0e0; border-radius: 4px; background: #fff; font-size: 20px; cursor: pointer; transition: all 0.2s; }
+.qd-detail-btn:hover { background: #f5f5f5; border-color: #ccc; }
+.qd-detail-btn.is-blocked { background: #fff0f0; border-color: #ed424b; }
+.qd-detail-btn.is-blocked:hover { background: #ed424b; }
+
+/* 管理面板 */
+.qd-modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 99999; display: flex; justify-content: center; align-items: center; }
+.qd-modal { background: #fff; width: 720px; max-width: calc(100vw - 32px); max-height: 85vh; border-radius: 8px; display: flex; flex-direction: column; box-shadow: 0 5px 25px rgba(0, 0, 0, 0.2); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; color: #333; }
+.qd-modal-header { padding: 15px 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; background: #f8f8f8; border-radius: 8px 8px 0 0; }
+.qd-modal-title { font-weight: bold; font-size: 16px; }
+.qd-modal-count { font-weight: normal; color: #666; font-size: 13px; margin-left: 5px; }
+.qd-header-btns { display: flex; align-items: center; gap: 8px; }
+.qd-sync-bar { padding: 8px 20px; border-bottom: 1px solid #eee; font-size: 13px; }
+.qd-sync-row { display: flex; align-items: center; gap: 8px; }
+.qd-sync-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #666; }
+.qd-sync-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.qd-sync-form[hidden] { display: none; }
+.qd-sync-form .qd-search-input { flex: 1 1 180px; }
+.qd-modal-toolbar { padding: 10px 20px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; }
+.qd-search-input { flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; outline: none; }
+.qd-search-input:focus { border-color: #2a87d4; }
+.qd-select { padding: 5px 8px; border: 1px solid #ddd; border-radius: 4px; outline: none; cursor: pointer; background: #fff; font-size: 12px; }
+.qd-batch-bar { padding: 8px 20px; background: #f0f7ff; border-bottom: 1px solid #e1eaf5; display: flex; align-items: center; justify-content: space-between; font-size: 13px; }
+.qd-batch-bar label { cursor: pointer; display: flex; align-items: center; }
+.qd-modal-body { overflow-y: auto; flex: 1; min-height: 200px; }
+.qd-modal-footer { padding: 10px 20px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; background: #fafafa; border-radius: 0 0 8px 8px; }
+.qd-pager { display: flex; align-items: center; gap: 10px; }
+.qd-page-info { font-size: 13px; color: #666; }
+.qd-block-item { padding: 10px 20px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; }
+.qd-block-item:hover { background: #fafafa; }
+.qd-chk { margin: 0 12px 0 0; cursor: pointer; }
+.qd-item-info { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.qd-item-title { font-weight: 500; color: #333; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qd-item-title:hover { color: #ed424b; }
+.qd-item-meta { font-size: 12px; color: #999; margin-top: 3px; }
+.qd-btn { padding: 5px 12px; border: 1px solid #ddd; background: #fff; cursor: pointer; border-radius: 4px; font-size: 12px; color: #333; transition: all 0.2s; }
+.qd-btn:hover:not(:disabled) { background: #f5f5f5; border-color: #ccc; }
+.qd-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.qd-btn-danger { color: #ed424b; border-color: #ffdbdb; background: #fff5f5; }
+.qd-btn-danger:hover:not(:disabled) { background: #ed424b; color: #fff; border-color: #ed424b; }
+.qd-btn-close { border: none; font-size: 18px; line-height: 1; padding: 2px 6px; margin-left: 4px; }
+.qd-empty-tip { text-align: center; color: #999; padding: 40px; }
+
+/* 提示条 */
+.qd-toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 99999; display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 6px; background: rgba(0, 0, 0, 0.85); color: #fff; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); }
+.qd-toast-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qd-toast-action { flex-shrink: 0; padding: 0; border: none; background: none; color: #ffd666; font-size: 14px; cursor: pointer; }
+.qd-toast-action:hover { text-decoration: underline; }

@@ -1,14 +1,14 @@
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
 const { test } = require("node:test");
 const vm = require("node:vm");
+const loadSources = require("./support/load-sources.cjs");
 
-const source = readFileSync(join(__dirname, "../qidian-novel-blocker.user.js"), "utf8");
-const script = new vm.Script(source.replace(
-    /^(    )init\(\);$/m,
-    "$1Object.assign(globalThis, { Storage, Sync, init, DATA_KEY, STORAGE_LOCK });"
-));
+const script = loadSources(`
+    import { Storage, DATA_KEY, STORAGE_LOCK } from "./src/core/storage.mjs";
+    import { Sync } from "./src/core/sync.mjs";
+    import { init } from "./src/app.mjs";
+    Object.assign(globalThis, { Storage, Sync, init, DATA_KEY, STORAGE_LOCK });
+`);
 const entry = (title) => ({ title, time: 1 });
 const config = (repo = "mock/old") => ({ repo, path: "blocklist.json", token: "mock-token" });
 

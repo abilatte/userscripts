@@ -1,11 +1,12 @@
 const assert = require("node:assert/strict");
-const { readFileSync } = require("node:fs");
-const { join } = require("node:path");
 const { test } = require("node:test");
 const vm = require("node:vm");
+const loadSources = require("./support/load-sources.cjs");
 
-const source = readFileSync(join(__dirname, "../qidian-novel-blocker.user.js"), "utf8");
-const script = new vm.Script(source.replace(/^    init\(\);$/m, "    globalThis.pager = CoverPager;"));
+const script = loadSources(`
+    import { CoverPager } from "./src/pages/pagination.mjs";
+    globalThis.pager = CoverPager;
+`);
 const next = "https://www.qidian.com/all/chanId22-orderId11-page2/";
 
 function createPager(responses) {
