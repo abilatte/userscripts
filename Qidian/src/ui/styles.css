@@ -67,6 +67,17 @@
 .qd-btn-close { border: none; font-size: 18px; line-height: 1; padding: 2px 6px; margin-left: 4px; }
 .qd-empty-tip { text-align: center; color: #999; padding: 40px; }
 
+.qd-category-dialog { width: 480px; max-width: calc(100vw - 32px); max-height: 85vh; box-sizing: border-box; padding: 0; overflow-y: auto; border: 0; border-radius: 8px; background: #fff; box-shadow: 0 5px 25px rgba(0, 0, 0, 0.2); color: #333; font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif; }
+.qd-category-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+.qd-category-dialog h2 { margin: 0; }
+.qd-category-content { padding: 16px 20px; }
+.qd-category-fields, .qd-category-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
+.qd-category-content h3 { margin: 14px 0 4px; font-size: 14px; }
+.qd-category-feedback { min-height: 1.5em; margin: 8px 0; }
+.qd-category-note { margin: 4px 0; color: #666; }
+.qd-category-rules { margin: 8px 0 0; padding: 0; list-style: none; }
+.qd-category-rules li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid #eee; }
+
 /* 提示条 */
 .qd-toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 99999; display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 6px; background: rgba(0, 0, 0, 0.85); color: #fff; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); }
 .qd-toast-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

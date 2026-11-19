@@ -154,6 +154,41 @@ test("旧版字符串记录与空书单仍可作为远端数据", { timeout: 300
     }
 });
 
+test("按分类批量加入书目保留旧记录，自动规则独立保存且不进入待同步书单", { timeout: 3000 }, async () => {
+    const old = { ...entry("旧书"), category: "仙侠", subCategory: "古典仙侠" };
+    const h = createHarness({
+        qidian_blocked_map_v5: { 1: old },
+        qidian_sync_config: config(),
+        qidian_sync_state: { sha: "base" }
+    });
+    const a = h.createTab();
+    const b = h.createTab();
+    const { Storage, DATA_KEY } = a;
+    const rule = { category: "仙侠", subCategory: "古典仙侠" };
+    let ruleChanges = 0;
+    b.Storage.onCategoryRulesChange(() => { ruleChanges++; });
+
+    const added = await Storage.addMany({
+        1: { title: "不要覆盖旧书", ...rule },
+        2: { title: "新书", ...rule }
+    });
+    assert.deepEqual(Array.from(added), ["2"]);
+    assert.deepEqual(h.saved.get(DATA_KEY).map[1], old);
+    assert.deepEqual(h.saved.get(DATA_KEY).sync.upsert, ["2"]);
+    assert.equal(await Storage.setCategoryRule(rule, true), true);
+    assert.equal(await Storage.setCategoryRule(rule, true), false);
+    h.deliver(b);
+    assert.deepEqual(structuredClone(b.Storage.getCategoryRules()), [rule]);
+
+    assert.equal(await Storage.setCategoryRule(rule, false), true);
+    h.deliver(b);
+    assert.equal(ruleChanges, 2);
+    assert.deepEqual(h.saved.get(DATA_KEY).categoryRules, []);
+    assert.deepEqual(h.saved.get(DATA_KEY).sync.upsert, ["2"]);
+    assert.deepEqual(Object.keys(h.saved.get(DATA_KEY).map), ["1", "2"]);
+    assert.deepEqual(h.requests, []);
+});
+
 test("首次同步耗尽重试后，重新打开标签页仍能上传本机记录", { timeout: 3000 }, async () => {
     const h = createHarness({ qidian_blocked_map_v5: { 1: "本机书" } });
     const a = h.createTab();

@@ -2,7 +2,7 @@
 // @name         起点小说屏蔽工具
 // @name:en      Qidian Novel Blocker
 // @namespace    abilatte
-// @version      2.7
+// @version      2.8
 // @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
 // @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
 // @author       abilatte
@@ -72,7 +72,10 @@
       };
       return Category.build(readName(selectors.category), readName(selectors.subCategory));
     },
-    isMissing: (entry) => !entry.category || !entry.subCategory
+    isMissing: (entry) => !entry.category || !entry.subCategory,
+    same: (a, b) => a.category === b.category && a.subCategory === b.subCategory,
+    matches: (entry, rule) => entry.category === rule.category && (!rule.subCategory || entry.subCategory === rule.subCategory),
+    label: ({ category, subCategory }) => subCategory ? `${category} / ${subCategory}` : category
   };
   var normalizeEntry = (value) => {
     if (typeof value === "string") {
@@ -144,6 +147,7 @@
     _listeners: [],
     _snapshotListeners: [],
     _localChangeListeners: [],
+    _categoryRuleListeners: [],
     read: () => {
       const saved = GM_getValue(DATA_KEY, null);
       const cached = Storage._data;
@@ -160,11 +164,15 @@
     },
     getData: () => Storage._data ??= Storage.read(),
     getMap: () => Storage.getData().map,
+    getCategoryRules: () => Storage.getData().categoryRules ?? [],
     accept: (data) => {
       const previous = Storage._data;
       if (previous && data.revision <= previous.revision) return;
       Storage._data = data;
       Storage._snapshotListeners.forEach((fn) => fn(data));
+      if ((data.categoryRulesRevision ?? 0) !== (previous?.categoryRulesRevision ?? 0)) {
+        Storage._categoryRuleListeners.forEach((fn) => fn());
+      }
       if (!previous || data.mapRevision !== previous.mapRevision) {
         Storage._listeners.forEach((fn) => fn(data.map, previous?.map));
       }
@@ -183,7 +191,7 @@
         Storage.accept(current);
         const next = { ...current };
         result = edit(next);
-        if (next.map === current.map && next.config === current.config && next.sync === current.sync) return;
+        if (next.map === current.map && next.config === current.config && next.sync === current.sync && next.categoryRules === current.categoryRules) return;
         next.revision++;
         if (next.map !== current.map) next.mapRevision++;
         localStorage.setItem(STORAGE_LOCK, String(next.revision));
@@ -215,6 +223,7 @@
     onChange: (fn) => Storage._listeners.push(fn),
     onSnapshot: (fn) => Storage._snapshotListeners.push(fn),
     onLocalChange: (fn) => Storage._localChangeListeners.push(fn),
+    onCategoryRulesChange: (fn) => Storage._categoryRuleListeners.push(fn),
     reportError: (err) => {
       console.error("QidianBlocker Storage Error:", err);
       alert(`屏蔽列表操作失败：${err.message}`);
@@ -226,6 +235,27 @@
         map[bid] = { title, time: Date.now(), ...category };
       });
     },
+    addMany: (entries) => Storage.changeMap((map) => {
+      const time = Date.now();
+      const added = [];
+      for (const [bid, entry] of Object.entries(entries)) {
+        if (!BID_PATTERN.test(bid) || !entry.title) throw new Error(`invalid book: ${bid}`);
+        if (hasOwn(map, bid)) continue;
+        map[bid] = { ...entry, time };
+        added.push(bid);
+      }
+      return added;
+    }),
+    setCategoryRule: (selection, enabled) => Storage.transact((data) => {
+      const rule = Category.build(selection.category?.trim(), selection.subCategory?.trim());
+      if (!rule.category) throw new Error("请选择大类");
+      const rules = data.categoryRules ?? [];
+      const existing = rules.find((candidate) => Category.same(candidate, rule));
+      if (Boolean(existing) === enabled) return false;
+      data.categoryRules = enabled ? [...rules, rule] : rules.filter((candidate) => candidate !== existing);
+      data.categoryRulesRevision = (data.categoryRulesRevision ?? 0) + 1;
+      return true;
+    }),
     // 只补缺失的分区字段，已有的不覆盖
     fillCategories: (updates) => {
       const entries = Object.entries(updates).filter(([, category]) => category.category || category.subCategory);
@@ -590,6 +620,7 @@ ${lines.join(",\n")}
 
   // src/pages/list.mjs
   var HIDDEN_CLASS = "qd-hidden";
+  var readTitle = (link) => (link.getAttribute("title") || link.textContent).trim();
   var ListPage = {
     itemSelector: SELECTORS.listLayouts.map((layout) => layout.item).join(", "),
     byItem: /* @__PURE__ */ new Map(),
@@ -603,10 +634,8 @@ ${lines.join(",\n")}
       ListPage.byItem.delete(item);
       const records = ListPage.byBid.get(record.bid);
       records.delete(record);
-      if (!records.size) {
-        ListPage.byBid.delete(record.bid);
-        ListPage.blocked.delete(record.bid);
-      }
+      if (!records.size) ListPage.byBid.delete(record.bid);
+      ListPage.refreshBlocked(record.bid);
       ListPage.setVisibility(item, false);
       record.button.remove();
       record.label?.remove();
@@ -617,6 +646,7 @@ ${lines.join(",\n")}
       const bid = link?.dataset.bid ?? "";
       const current = ListPage.byItem.get(item);
       if (current && current.layout === layout && current.link === link && current.bid === bid && current.button.parentElement === link.parentElement) {
+        current.category = Category.fromElements(item, layout);
         return current;
       }
       ListPage.forget(item);
@@ -624,36 +654,44 @@ ${lines.join(",\n")}
       item.querySelectorAll(".qd-block-btn, .qd-blocked-preview-label").forEach((el) => el.remove());
       const button = ListPage.createButton(bid, link, item, layout);
       link.before(button);
-      const record = { bid, item, link, layout, button, label: null };
+      const category = Category.fromElements(item, layout);
+      const record = { bid, item, link, layout, category, button, label: null, blocked: false };
       ListPage.byItem.set(item, record);
       if (!ListPage.byBid.has(bid)) ListPage.byBid.set(bid, /* @__PURE__ */ new Set());
       ListPage.byBid.get(bid).add(record);
       return record;
     },
     update: (records, map) => {
+      const rules = Storage.getCategoryRules();
       const updates = {};
+      const changedIds = /* @__PURE__ */ new Set();
       records.forEach((record) => {
-        const { item, bid, link, layout } = record;
-        const blocked = hasOwn(map, bid);
-        ListPage.setVisibility(item, blocked);
-        if (!blocked) {
-          ListPage.blocked.delete(bid);
-          return;
-        }
-        ListPage.blocked.add(bid);
+        const { item, bid, link, category } = record;
+        const individuallyBlocked = hasOwn(map, bid);
+        record.blocked = individuallyBlocked || rules.some((rule) => Category.matches(category, rule));
+        changedIds.add(bid);
+        ListPage.setVisibility(item, record.blocked);
+        if (!record.blocked) return;
         if (!record.label?.isConnected) {
-          const label = document.createElement("span");
-          label.className = "qd-blocked-preview-label";
-          label.textContent = "已屏蔽";
-          link.before(label);
-          record.label = label;
+          const label2 = document.createElement("span");
+          label2.className = "qd-blocked-preview-label";
+          link.before(label2);
+          record.label = label2;
         }
-        if (Category.isMissing(map[bid])) {
-          updates[bid] = { ...updates[bid], ...Category.fromElements(item, layout) };
+        const label = individuallyBlocked ? "已屏蔽" : "按分类屏蔽";
+        if (record.label.textContent !== label) record.label.textContent = label;
+        if (individuallyBlocked && Category.isMissing(map[bid])) {
+          updates[bid] = { ...updates[bid], ...category };
         }
       });
+      changedIds.forEach(ListPage.refreshBlocked);
       Storage.fillCategories(updates);
       ListPage.renderSummary();
+    },
+    refreshBlocked: (bid) => {
+      const records = ListPage.byBid.get(bid);
+      if (records && [...records].some((record) => record.blocked)) ListPage.blocked.add(bid);
+      else ListPage.blocked.delete(bid);
     },
     applyNew: (items) => {
       const records = Array.from(items, ListPage.track).filter(Boolean);
@@ -664,7 +702,19 @@ ${lines.join(",\n")}
       const records = [...upsert, ...remove].flatMap((bid) => [...ListPage.byBid.get(bid) ?? []]);
       if (records.length) ListPage.update(records, map);
     },
-    mountSummary: () => {
+    applyRules: () => ListPage.update(ListPage.byItem, Storage.getMap()),
+    getBatchEntries: (selection) => {
+      const entries = {};
+      if (!selection.category) return entries;
+      const map = Storage.getMap();
+      for (const { bid, category, link } of ListPage.byItem.values()) {
+        if (hasOwn(map, bid) || hasOwn(entries, bid) || !Category.matches(category, selection)) continue;
+        const title = readTitle(link);
+        if (title) entries[bid] = { title, ...category };
+      }
+      return entries;
+    },
+    mountSummary: (openCategoryPanel) => {
       const root = document.querySelector(SELECTORS.listLayouts.map((layout) => layout.root).join(", "));
       if (ListPage.summary?.root === root) return;
       ListPage.summary?.toolbar.remove();
@@ -678,7 +728,12 @@ ${lines.join(",\n")}
       toggle.type = "button";
       toggle.className = "qd-list-action";
       toggle.onclick = () => ListPage.setReveal(!ListPage.reveal);
-      toolbar.append(status, toggle);
+      const categories = document.createElement("button");
+      categories.type = "button";
+      categories.className = "qd-list-action";
+      categories.textContent = "按分类屏蔽";
+      categories.onclick = openCategoryPanel;
+      toolbar.append(status, toggle, categories);
       document.body.append(toolbar);
       ListPage.summary = { root, toolbar, status, toggle };
       ListPage.renderSummary();
@@ -686,7 +741,7 @@ ${lines.join(",\n")}
     setReveal: (reveal) => {
       ListPage.reveal = reveal;
       ListPage.blocked.forEach((bid) => {
-        ListPage.byBid.get(bid).forEach(({ item }) => ListPage.setVisibility(item, true));
+        ListPage.byBid.get(bid).forEach(({ item, blocked }) => ListPage.setVisibility(item, blocked));
       });
       ListPage.renderSummary();
     },
@@ -696,9 +751,9 @@ ${lines.join(",\n")}
     },
     renderSummary: () => {
       if (!ListPage.summary) return;
-      const { toolbar, status, toggle } = ListPage.summary;
+      const { status, toggle } = ListPage.summary;
       const count = ListPage.blocked.size;
-      toolbar.hidden = count === 0 && !ListPage.reveal;
+      status.hidden = toggle.hidden = count === 0 && !ListPage.reveal;
       const message = `${ListPage.reveal ? "临时显示已屏蔽作品" : "已隐藏"} ${count} 本`;
       if (status.textContent !== message) status.textContent = message;
       const action = ListPage.reveal ? "恢复隐藏" : "临时显示";
@@ -745,7 +800,7 @@ ${lines.join(",\n")}
       btn.addEventListener("click", async (e) => {
         e.preventDefault();
         e.stopPropagation();
-        const title = (link.getAttribute("title") || link.textContent).trim();
+        const title = readTitle(link);
         if (!title) {
           alert("未能读取书名，屏蔽失败。");
           return;
@@ -926,6 +981,145 @@ ${lines.join(",\n")}
       } finally {
         clearTimeout(timer);
         view.request = null;
+      }
+    }
+  };
+
+  // src/ui/category-panel.mjs
+  var sortNames = (names) => [...names].sort((a, b) => a.localeCompare(b, "zh"));
+  function fillSelect(select, names, label) {
+    const value = select.value;
+    select.replaceChildren(new Option(label, ""), ...names.map((name) => new Option(name, name)));
+    select.value = names.includes(value) ? value : "";
+  }
+  var CategoryPanel = {
+    els: null,
+    open: () => {
+      if (CategoryPanel.els) {
+        CategoryPanel.els.category.focus();
+        return;
+      }
+      const dialog = document.createElement("dialog");
+      dialog.className = "qd-category-dialog";
+      dialog.setAttribute("aria-labelledby", "qd-category-title");
+      dialog.innerHTML = `
+            <div class="qd-modal-header">
+                <h2 class="qd-modal-title" id="qd-category-title">按分类屏蔽</h2>
+                <button type="button" class="qd-btn qd-btn-close" data-el="close" aria-label="关闭">×</button>
+            </div>
+            <div class="qd-category-content">
+                <div class="qd-category-fields">
+                    <label>大类 <select class="qd-select" data-el="category"></select></label>
+                    <label>小类 <select class="qd-select" data-el="subCategory"></select></label>
+                </div>
+                <div class="qd-category-actions">
+                    <button type="button" class="qd-btn qd-btn-danger" data-el="batch">屏蔽已加载的书</button>
+                    <button type="button" class="qd-btn" data-el="addRule">添加自动屏蔽规则</button>
+                </div>
+                <p class="qd-category-feedback" data-el="status" role="status"></p>
+                <h3>自动屏蔽规则</h3>
+                <p class="qd-category-note">规则会隐藏之后遇到的同类书，保存在当前浏览器。</p>
+                <ul class="qd-category-rules" data-el="rules"></ul>
+            </div>
+        `;
+      const els = { dialog, busy: false };
+      dialog.querySelectorAll("[data-el]").forEach((el) => {
+        els[el.dataset.el] = el;
+      });
+      els.close.onclick = () => dialog.close();
+      dialog.addEventListener("close", () => {
+        CategoryPanel.els = null;
+        dialog.remove();
+      }, { once: true });
+      els.category.onchange = () => {
+        els.subCategory.value = "";
+        els.status.textContent = "";
+        CategoryPanel.refresh();
+      };
+      els.subCategory.onchange = () => {
+        els.status.textContent = "";
+        CategoryPanel.refresh();
+      };
+      els.batch.onclick = CategoryPanel.blockLoaded;
+      els.addRule.onclick = () => CategoryPanel.saveRule(CategoryPanel.selection(), true);
+      document.body.append(dialog);
+      CategoryPanel.els = els;
+      CategoryPanel.refresh();
+      dialog.showModal();
+      els.category.focus();
+    },
+    selection: () => {
+      const { category, subCategory } = CategoryPanel.els;
+      return Category.build(category.value, subCategory.value);
+    },
+    change: async (action) => {
+      const els = CategoryPanel.els;
+      if (!els || els.busy) return;
+      els.busy = true;
+      CategoryPanel.refresh();
+      try {
+        els.status.textContent = await action();
+      } catch (err) {
+        console.error("QidianBlocker Category Error:", err);
+        els.status.textContent = `操作失败：${err.message}`;
+      } finally {
+        els.busy = false;
+        if (CategoryPanel.els === els) CategoryPanel.refresh();
+      }
+    },
+    blockLoaded: () => {
+      const selection = CategoryPanel.selection();
+      const entries = ListPage.getBatchEntries(selection);
+      const count = Object.keys(entries).length;
+      if (!count || !confirm(`将「${Category.label(selection)}」中已加载的 ${count} 本书加入屏蔽列表？`)) return;
+      return CategoryPanel.change(async () => {
+        const added = await Storage.addMany(entries);
+        return added.length ? `已屏蔽 ${added.length} 本书` : "这些书已在屏蔽列表中";
+      });
+    },
+    saveRule: (rule, enabled) => CategoryPanel.change(async () => {
+      const changed = await Storage.setCategoryRule(rule, enabled);
+      if (enabled) return changed ? `已添加「${Category.label(rule)}」规则` : "规则已存在";
+      return changed ? `已移除「${Category.label(rule)}」规则` : "规则已移除";
+    }),
+    refresh: () => {
+      const els = CategoryPanel.els;
+      if (!els) return;
+      const rules = Storage.getCategoryRules();
+      const categories = /* @__PURE__ */ new Map();
+      const addCategory = ({ category, subCategory }) => {
+        if (!category) return;
+        if (!categories.has(category)) categories.set(category, /* @__PURE__ */ new Set());
+        if (subCategory) categories.get(category).add(subCategory);
+      };
+      ListPage.byItem.forEach((record) => addCategory(record.category));
+      rules.forEach(addCategory);
+      fillSelect(els.category, sortNames(categories.keys()), categories.size ? "选择大类" : "暂无可选大类");
+      fillSelect(els.subCategory, sortNames(categories.get(els.category.value) ?? []), "整个大类");
+      els.subCategory.disabled = !els.category.value;
+      const selection = CategoryPanel.selection();
+      const count = Object.keys(ListPage.getBatchEntries(selection)).length;
+      els.batch.textContent = selection.category ? `屏蔽已加载的 ${count} 本` : "屏蔽已加载的书";
+      els.batch.disabled = !count || els.busy;
+      els.addRule.disabled = !selection.category || els.busy || rules.some((rule) => Category.same(rule, selection));
+      els.rules.replaceChildren(...rules.map((rule) => {
+        const item = document.createElement("li");
+        const label = document.createElement("span");
+        label.textContent = Category.label(rule);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "qd-btn";
+        remove.textContent = "移除规则";
+        remove.setAttribute("aria-label", `移除 ${Category.label(rule)} 规则`);
+        remove.disabled = els.busy;
+        remove.onclick = () => CategoryPanel.saveRule(rule, false);
+        item.append(label, remove);
+        return item;
+      }));
+      if (!rules.length) {
+        const empty = document.createElement("li");
+        empty.textContent = "暂无规则";
+        els.rules.append(empty);
       }
     }
   };
@@ -1183,7 +1377,7 @@ ${lines.join(",\n")}
         });
         return counts;
       };
-      const fillSelect = (select, counts, value, allLabel, unknownLabel) => {
+      const fillSelect2 = (select, counts, value, allLabel, unknownLabel) => {
         const names = Array.from(counts.keys()).filter((name) => name !== UNKNOWN_CATEGORY).sort((a, b) => a.localeCompare(b, "zh"));
         if (counts.has(UNKNOWN_CATEGORY)) names.push(UNKNOWN_CATEGORY);
         select.replaceChildren(
@@ -1198,8 +1392,8 @@ ${lines.join(",\n")}
       const subEntries = entries.filter((entry) => (entry.category || UNKNOWN_CATEGORY) === state.categoryFilter);
       const subCategoryCounts = countBy(subEntries, "subCategory");
       if (!subCategoryCounts.has(state.subCategoryFilter)) state.subCategoryFilter = "";
-      fillSelect(els.categoryFilter, categoryCounts, state.categoryFilter, "全部大分区", "未知分区");
-      fillSelect(els.subCategoryFilter, subCategoryCounts, state.subCategoryFilter, "全部小分区", "未知小分区");
+      fillSelect2(els.categoryFilter, categoryCounts, state.categoryFilter, "全部大分区", "未知分区");
+      fillSelect2(els.subCategoryFilter, subCategoryCounts, state.subCategoryFilter, "全部小分区", "未知小分区");
       els.subCategoryFilter.disabled = !state.categoryFilter;
     },
     render: () => {
@@ -1295,8 +1489,9 @@ ${lines.join(",\n")}
     };
     const refreshListControls = () => {
       if (document.readyState === "loading") return;
-      ListPage.mountSummary();
+      ListPage.mountSummary(CategoryPanel.open);
       ListPage.renderSummary();
+      CategoryPanel.refresh();
       if (coverPagerEnabled) CoverPager.mount();
     };
     const applyInitialPage = () => {
@@ -1316,6 +1511,12 @@ ${lines.join(",\n")}
     });
     GM_registerMenuCommand("⚙️ 管理屏蔽列表", Panel.open);
     if (isListPage) {
+      Storage.onChange(CategoryPanel.refresh);
+      Storage.onCategoryRulesChange(() => {
+        ListPage.applyRules();
+        CategoryPanel.refresh();
+      });
+      GM_registerMenuCommand("按分类屏蔽", CategoryPanel.open);
       GM_registerMenuCommand(`${coverPagerEnabled ? "关闭" : "开启"}内置无缝翻页`, () => {
         GM_setValue(COVER_PAGER_ENABLED_KEY, !coverPagerEnabled);
         location.reload();
@@ -1330,7 +1531,7 @@ ${lines.join(",\n")}
   }
 
   // src/ui/styles.css
-  var styles_default = '.qd-hidden { display: none !important; }\n\n/* 原站为 float 两列布局，条目隐藏后会错位，改为 flex 换行 */\n#book-img-text .all-img-list { display: flex !important; flex-wrap: wrap; }\n#book-img-text .all-img-list > li { float: none !important; }\n/* 非书籍条目（如无缝翻页脚本插入的分页条）原本靠 clear: both 换行，flex 下改为独占一行。\n   用 :has 而不是脚本添加的 class 判断，条目在脚本处理前就能按两列排布 */\n#book-img-text .all-img-list > :not(:has(.book-mid-info)) { flex-basis: 100%; }\n\n/* 原站用上边框分隔各行，并靠 li:first-child 和 li:first-child + li 去掉首行的上边框。\n   隐藏条目或插入分页条后「首行」不再固定，改为每个条目统一用下边框分隔，同一行的条目始终等高 */\n#book-img-text .all-img-list > li:has(.book-mid-info) { border-top: none; padding-top: 0; border-bottom: 1px solid #e6e6e6; margin-bottom: 25px; }\n.qd-list-pager, .qd-hidden-summary { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; color: #666; font-size: 13px; }\n.qd-list-pager { min-height: 36px; padding: 4px 0; }\n.qd-hidden-summary { position: fixed; top: clamp(64px, 18vh, 180px); right: 16px; z-index: 4; max-width: calc(100vw - 32px); box-sizing: border-box; padding: 4px 10px; border: 1px solid #e6e6e6; border-radius: 4px; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08); }\n.qd-list-action { padding: 2px 6px; border: 0; background: none; color: #0060a8; cursor: pointer; }\n.qd-list-action[hidden], .qd-hidden-summary[hidden] { display: none; }\n.qd-blocked-preview .qd-block-btn { display: none; }\n.qd-blocked-preview-label { display: none; float: right; margin: 0 0 0 6px; color: #a13c35; font-size: 12px; }\n.qd-blocked-preview .qd-blocked-preview-label { display: inline; }\n\n/* 列表页屏蔽按钮：插在书名链接前并右浮动，文字模式的 a.name 是 block，放在后面会换行 */\n.qd-block-btn { float: right; margin: 2px 0 0 4px; cursor: pointer; font-size: 15px; line-height: 1; opacity: 0.5; transition: opacity 0.2s, transform 0.2s; user-select: none; }\n.qd-block-btn:hover { opacity: 1; transform: scale(1.2); }\n\n/* 详情页按钮（尺寸对齐站内 .blue-btn-detail） */\n.qd-detail-btn { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; margin-right: 12px; padding: 0; border: 1px solid #e0e0e0; border-radius: 4px; background: #fff; font-size: 20px; cursor: pointer; transition: all 0.2s; }\n.qd-detail-btn:hover { background: #f5f5f5; border-color: #ccc; }\n.qd-detail-btn.is-blocked { background: #fff0f0; border-color: #ed424b; }\n.qd-detail-btn.is-blocked:hover { background: #ed424b; }\n\n/* 管理面板 */\n.qd-modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 99999; display: flex; justify-content: center; align-items: center; }\n.qd-modal { background: #fff; width: 720px; max-width: calc(100vw - 32px); max-height: 85vh; border-radius: 8px; display: flex; flex-direction: column; box-shadow: 0 5px 25px rgba(0, 0, 0, 0.2); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; color: #333; }\n.qd-modal-header { padding: 15px 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; background: #f8f8f8; border-radius: 8px 8px 0 0; }\n.qd-modal-title { font-weight: bold; font-size: 16px; }\n.qd-modal-count { font-weight: normal; color: #666; font-size: 13px; margin-left: 5px; }\n.qd-header-btns { display: flex; align-items: center; gap: 8px; }\n.qd-sync-bar { padding: 8px 20px; border-bottom: 1px solid #eee; font-size: 13px; }\n.qd-sync-row { display: flex; align-items: center; gap: 8px; }\n.qd-sync-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #666; }\n.qd-sync-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }\n.qd-sync-form[hidden] { display: none; }\n.qd-sync-form .qd-search-input { flex: 1 1 180px; }\n.qd-modal-toolbar { padding: 10px 20px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; }\n.qd-search-input { flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; outline: none; }\n.qd-search-input:focus { border-color: #2a87d4; }\n.qd-select { padding: 5px 8px; border: 1px solid #ddd; border-radius: 4px; outline: none; cursor: pointer; background: #fff; font-size: 12px; }\n.qd-batch-bar { padding: 8px 20px; background: #f0f7ff; border-bottom: 1px solid #e1eaf5; display: flex; align-items: center; justify-content: space-between; font-size: 13px; }\n.qd-batch-bar label { cursor: pointer; display: flex; align-items: center; }\n.qd-modal-body { overflow-y: auto; flex: 1; min-height: 200px; }\n.qd-modal-footer { padding: 10px 20px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; background: #fafafa; border-radius: 0 0 8px 8px; }\n.qd-pager { display: flex; align-items: center; gap: 10px; }\n.qd-page-info { font-size: 13px; color: #666; }\n.qd-block-item { padding: 10px 20px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; }\n.qd-block-item:hover { background: #fafafa; }\n.qd-chk { margin: 0 12px 0 0; cursor: pointer; }\n.qd-item-info { flex: 1; display: flex; flex-direction: column; min-width: 0; }\n.qd-item-title { font-weight: 500; color: #333; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.qd-item-title:hover { color: #ed424b; }\n.qd-item-meta { font-size: 12px; color: #999; margin-top: 3px; }\n.qd-btn { padding: 5px 12px; border: 1px solid #ddd; background: #fff; cursor: pointer; border-radius: 4px; font-size: 12px; color: #333; transition: all 0.2s; }\n.qd-btn:hover:not(:disabled) { background: #f5f5f5; border-color: #ccc; }\n.qd-btn:disabled { opacity: 0.5; cursor: not-allowed; }\n.qd-btn-danger { color: #ed424b; border-color: #ffdbdb; background: #fff5f5; }\n.qd-btn-danger:hover:not(:disabled) { background: #ed424b; color: #fff; border-color: #ed424b; }\n.qd-btn-close { border: none; font-size: 18px; line-height: 1; padding: 2px 6px; margin-left: 4px; }\n.qd-empty-tip { text-align: center; color: #999; padding: 40px; }\n\n/* 提示条 */\n.qd-toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 99999; display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 6px; background: rgba(0, 0, 0, 0.85); color: #fff; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); }\n.qd-toast-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.qd-toast-action { flex-shrink: 0; padding: 0; border: none; background: none; color: #ffd666; font-size: 14px; cursor: pointer; }\n.qd-toast-action:hover { text-decoration: underline; }\n';
+  var styles_default = '.qd-hidden { display: none !important; }\n\n/* 原站为 float 两列布局，条目隐藏后会错位，改为 flex 换行 */\n#book-img-text .all-img-list { display: flex !important; flex-wrap: wrap; }\n#book-img-text .all-img-list > li { float: none !important; }\n/* 非书籍条目（如无缝翻页脚本插入的分页条）原本靠 clear: both 换行，flex 下改为独占一行。\n   用 :has 而不是脚本添加的 class 判断，条目在脚本处理前就能按两列排布 */\n#book-img-text .all-img-list > :not(:has(.book-mid-info)) { flex-basis: 100%; }\n\n/* 原站用上边框分隔各行，并靠 li:first-child 和 li:first-child + li 去掉首行的上边框。\n   隐藏条目或插入分页条后「首行」不再固定，改为每个条目统一用下边框分隔，同一行的条目始终等高 */\n#book-img-text .all-img-list > li:has(.book-mid-info) { border-top: none; padding-top: 0; border-bottom: 1px solid #e6e6e6; margin-bottom: 25px; }\n.qd-list-pager, .qd-hidden-summary { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 12px; color: #666; font-size: 13px; }\n.qd-list-pager { min-height: 36px; padding: 4px 0; }\n.qd-hidden-summary { position: fixed; top: clamp(64px, 18vh, 180px); right: 16px; z-index: 4; max-width: calc(100vw - 32px); box-sizing: border-box; padding: 4px 10px; border: 1px solid #e6e6e6; border-radius: 4px; background: #fff; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08); }\n.qd-list-action { padding: 2px 6px; border: 0; background: none; color: #0060a8; cursor: pointer; }\n.qd-list-action[hidden], .qd-hidden-summary[hidden] { display: none; }\n.qd-blocked-preview .qd-block-btn { display: none; }\n.qd-blocked-preview-label { display: none; float: right; margin: 0 0 0 6px; color: #a13c35; font-size: 12px; }\n.qd-blocked-preview .qd-blocked-preview-label { display: inline; }\n\n/* 列表页屏蔽按钮：插在书名链接前并右浮动，文字模式的 a.name 是 block，放在后面会换行 */\n.qd-block-btn { float: right; margin: 2px 0 0 4px; cursor: pointer; font-size: 15px; line-height: 1; opacity: 0.5; transition: opacity 0.2s, transform 0.2s; user-select: none; }\n.qd-block-btn:hover { opacity: 1; transform: scale(1.2); }\n\n/* 详情页按钮（尺寸对齐站内 .blue-btn-detail） */\n.qd-detail-btn { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; margin-right: 12px; padding: 0; border: 1px solid #e0e0e0; border-radius: 4px; background: #fff; font-size: 20px; cursor: pointer; transition: all 0.2s; }\n.qd-detail-btn:hover { background: #f5f5f5; border-color: #ccc; }\n.qd-detail-btn.is-blocked { background: #fff0f0; border-color: #ed424b; }\n.qd-detail-btn.is-blocked:hover { background: #ed424b; }\n\n/* 管理面板 */\n.qd-modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); z-index: 99999; display: flex; justify-content: center; align-items: center; }\n.qd-modal { background: #fff; width: 720px; max-width: calc(100vw - 32px); max-height: 85vh; border-radius: 8px; display: flex; flex-direction: column; box-shadow: 0 5px 25px rgba(0, 0, 0, 0.2); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; color: #333; }\n.qd-modal-header { padding: 15px 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; background: #f8f8f8; border-radius: 8px 8px 0 0; }\n.qd-modal-title { font-weight: bold; font-size: 16px; }\n.qd-modal-count { font-weight: normal; color: #666; font-size: 13px; margin-left: 5px; }\n.qd-header-btns { display: flex; align-items: center; gap: 8px; }\n.qd-sync-bar { padding: 8px 20px; border-bottom: 1px solid #eee; font-size: 13px; }\n.qd-sync-row { display: flex; align-items: center; gap: 8px; }\n.qd-sync-status { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #666; }\n.qd-sync-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }\n.qd-sync-form[hidden] { display: none; }\n.qd-sync-form .qd-search-input { flex: 1 1 180px; }\n.qd-modal-toolbar { padding: 10px 20px; border-bottom: 1px solid #eee; display: flex; align-items: center; gap: 10px; }\n.qd-search-input { flex: 1; padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; outline: none; }\n.qd-search-input:focus { border-color: #2a87d4; }\n.qd-select { padding: 5px 8px; border: 1px solid #ddd; border-radius: 4px; outline: none; cursor: pointer; background: #fff; font-size: 12px; }\n.qd-batch-bar { padding: 8px 20px; background: #f0f7ff; border-bottom: 1px solid #e1eaf5; display: flex; align-items: center; justify-content: space-between; font-size: 13px; }\n.qd-batch-bar label { cursor: pointer; display: flex; align-items: center; }\n.qd-modal-body { overflow-y: auto; flex: 1; min-height: 200px; }\n.qd-modal-footer { padding: 10px 20px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; background: #fafafa; border-radius: 0 0 8px 8px; }\n.qd-pager { display: flex; align-items: center; gap: 10px; }\n.qd-page-info { font-size: 13px; color: #666; }\n.qd-block-item { padding: 10px 20px; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; }\n.qd-block-item:hover { background: #fafafa; }\n.qd-chk { margin: 0 12px 0 0; cursor: pointer; }\n.qd-item-info { flex: 1; display: flex; flex-direction: column; min-width: 0; }\n.qd-item-title { font-weight: 500; color: #333; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.qd-item-title:hover { color: #ed424b; }\n.qd-item-meta { font-size: 12px; color: #999; margin-top: 3px; }\n.qd-btn { padding: 5px 12px; border: 1px solid #ddd; background: #fff; cursor: pointer; border-radius: 4px; font-size: 12px; color: #333; transition: all 0.2s; }\n.qd-btn:hover:not(:disabled) { background: #f5f5f5; border-color: #ccc; }\n.qd-btn:disabled { opacity: 0.5; cursor: not-allowed; }\n.qd-btn-danger { color: #ed424b; border-color: #ffdbdb; background: #fff5f5; }\n.qd-btn-danger:hover:not(:disabled) { background: #ed424b; color: #fff; border-color: #ed424b; }\n.qd-btn-close { border: none; font-size: 18px; line-height: 1; padding: 2px 6px; margin-left: 4px; }\n.qd-empty-tip { text-align: center; color: #999; padding: 40px; }\n\n.qd-category-dialog { width: 480px; max-width: calc(100vw - 32px); max-height: 85vh; box-sizing: border-box; padding: 0; overflow-y: auto; border: 0; border-radius: 8px; background: #fff; box-shadow: 0 5px 25px rgba(0, 0, 0, 0.2); color: #333; font: 14px/1.5 system-ui, "Microsoft YaHei", sans-serif; }\n.qd-category-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }\n.qd-category-dialog h2 { margin: 0; }\n.qd-category-content { padding: 16px 20px; }\n.qd-category-fields, .qd-category-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }\n.qd-category-content h3 { margin: 14px 0 4px; font-size: 14px; }\n.qd-category-feedback { min-height: 1.5em; margin: 8px 0; }\n.qd-category-note { margin: 4px 0; color: #666; }\n.qd-category-rules { margin: 8px 0 0; padding: 0; list-style: none; }\n.qd-category-rules li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid #eee; }\n\n/* 提示条 */\n.qd-toast { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 99999; display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 32px); padding: 10px 16px; border-radius: 6px; background: rgba(0, 0, 0, 0.85); color: #fff; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); }\n.qd-toast-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\n.qd-toast-action { flex-shrink: 0; padding: 0; border: none; background: none; color: #ffd666; font-size: 14px; cursor: pointer; }\n.qd-toast-action:hover { text-decoration: underline; }\n';
 
   // src/index.mjs
   GM_addStyle(styles_default);

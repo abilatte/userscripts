@@ -17,7 +17,11 @@ export const Category = {
         };
         return Category.build(readName(selectors.category), readName(selectors.subCategory));
     },
-    isMissing: (entry) => !entry.category || !entry.subCategory
+    isMissing: (entry) => !entry.category || !entry.subCategory,
+    same: (a, b) => a.category === b.category && a.subCategory === b.subCategory,
+    matches: (entry, rule) => entry.category === rule.category &&
+        (!rule.subCategory || entry.subCategory === rule.subCategory),
+    label: ({ category, subCategory }) => subCategory ? `${category} / ${subCategory}` : category
 };
 
 export const normalizeEntry = (value) => {

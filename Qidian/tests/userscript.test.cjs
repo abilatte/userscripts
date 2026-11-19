@@ -35,6 +35,7 @@ test("发布产物带原有元数据，并从正常入口加载样式、注册�
     assert.equal(typeof events.get("DOMContentLoaded"), "function");
     assert.equal(typeof events.get("visibilitychange"), "function");
     assert.equal(typeof commands.get("⚙️ 管理屏蔽列表"), "function");
+    assert.equal(typeof commands.get("按分类屏蔽"), "function");
     commands.get("关闭内置无缝翻页")();
     assert.equal(values.get("qidian_cover_pager_enabled"), false);
     assert.equal(reloaded, true);

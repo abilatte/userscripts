@@ -4,6 +4,7 @@ import { Sync } from "./core/sync.mjs";
 import { DetailPage } from "./pages/detail.mjs";
 import { ListPage } from "./pages/list.mjs";
 import { CoverPager } from "./pages/pagination.mjs";
+import { CategoryPanel } from "./ui/category-panel.mjs";
 import { Panel } from "./ui/panel.mjs";
 
 const COVER_PAGER_ENABLED_KEY = "qidian_cover_pager_enabled";
@@ -22,8 +23,9 @@ export function init() {
     };
     const refreshListControls = () => {
         if (document.readyState === "loading") return;
-        ListPage.mountSummary();
+        ListPage.mountSummary(CategoryPanel.open);
         ListPage.renderSummary();
+        CategoryPanel.refresh();
         if (coverPagerEnabled) CoverPager.mount();
     };
     const applyInitialPage = () => {
@@ -44,6 +46,12 @@ export function init() {
     });
     GM_registerMenuCommand("⚙️ 管理屏蔽列表", Panel.open);
     if (isListPage) {
+        Storage.onChange(CategoryPanel.refresh);
+        Storage.onCategoryRulesChange(() => {
+            ListPage.applyRules();
+            CategoryPanel.refresh();
+        });
+        GM_registerMenuCommand("按分类屏蔽", CategoryPanel.open);
         GM_registerMenuCommand(`${coverPagerEnabled ? "关闭" : "开启"}内置无缝翻页`, () => {
             GM_setValue(COVER_PAGER_ENABLED_KEY, !coverPagerEnabled);
             location.reload();

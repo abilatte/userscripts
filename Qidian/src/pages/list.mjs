@@ -4,6 +4,7 @@ import { Storage } from "../core/storage.mjs";
 import { Toast } from "../ui/toast.mjs";
 
 const HIDDEN_CLASS = "qd-hidden";
+const readTitle = (link) => (link.getAttribute("title") || link.textContent).trim();
 
 export const ListPage = {
     itemSelector: SELECTORS.listLayouts.map((layout) => layout.item).join(", "),
@@ -19,10 +20,8 @@ export const ListPage = {
         ListPage.byItem.delete(item);
         const records = ListPage.byBid.get(record.bid);
         records.delete(record);
-        if (!records.size) {
-            ListPage.byBid.delete(record.bid);
-            ListPage.blocked.delete(record.bid);
-        }
+        if (!records.size) ListPage.byBid.delete(record.bid);
+        ListPage.refreshBlocked(record.bid);
         ListPage.setVisibility(item, false);
         record.button.remove();
         record.label?.remove();
@@ -35,6 +34,7 @@ export const ListPage = {
         const current = ListPage.byItem.get(item);
         if (current && current.layout === layout && current.link === link && current.bid === bid &&
             current.button.parentElement === link.parentElement) {
+            current.category = Category.fromElements(item, layout);
             return current;
         }
         ListPage.forget(item);
@@ -44,7 +44,8 @@ export const ListPage = {
         item.querySelectorAll(".qd-block-btn, .qd-blocked-preview-label").forEach((el) => el.remove());
         const button = ListPage.createButton(bid, link, item, layout);
         link.before(button);
-        const record = { bid, item, link, layout, button, label: null };
+        const category = Category.fromElements(item, layout);
+        const record = { bid, item, link, layout, category, button, label: null, blocked: false };
         ListPage.byItem.set(item, record);
         if (!ListPage.byBid.has(bid)) ListPage.byBid.set(bid, new Set());
         ListPage.byBid.get(bid).add(record);
@@ -52,29 +53,36 @@ export const ListPage = {
     },
 
     update: (records, map) => {
+        const rules = Storage.getCategoryRules();
         const updates = {};
+        const changedIds = new Set();
         records.forEach((record) => {
-            const { item, bid, link, layout } = record;
-            const blocked = hasOwn(map, bid);
-            ListPage.setVisibility(item, blocked);
-            if (!blocked) {
-                ListPage.blocked.delete(bid);
-                return;
-            }
-            ListPage.blocked.add(bid);
+            const { item, bid, link, category } = record;
+            const individuallyBlocked = hasOwn(map, bid);
+            record.blocked = individuallyBlocked || rules.some((rule) => Category.matches(category, rule));
+            changedIds.add(bid);
+            ListPage.setVisibility(item, record.blocked);
+            if (!record.blocked) return;
             if (!record.label?.isConnected) {
                 const label = document.createElement("span");
                 label.className = "qd-blocked-preview-label";
-                label.textContent = "已屏蔽";
                 link.before(label);
                 record.label = label;
             }
-            if (Category.isMissing(map[bid])) {
-                updates[bid] = { ...updates[bid], ...Category.fromElements(item, layout) };
+            const label = individuallyBlocked ? "已屏蔽" : "按分类屏蔽";
+            if (record.label.textContent !== label) record.label.textContent = label;
+            if (individuallyBlocked && Category.isMissing(map[bid])) {
+                updates[bid] = { ...updates[bid], ...category };
             }
         });
+        changedIds.forEach(ListPage.refreshBlocked);
         Storage.fillCategories(updates);
         ListPage.renderSummary();
+    },
+    refreshBlocked: (bid) => {
+        const records = ListPage.byBid.get(bid);
+        if (records && [...records].some((record) => record.blocked)) ListPage.blocked.add(bid);
+        else ListPage.blocked.delete(bid);
     },
     applyNew: (items) => {
         const records = Array.from(items, ListPage.track).filter(Boolean);
@@ -85,8 +93,20 @@ export const ListPage = {
         const records = [...upsert, ...remove].flatMap((bid) => [...(ListPage.byBid.get(bid) ?? [])]);
         if (records.length) ListPage.update(records, map);
     },
+    applyRules: () => ListPage.update(ListPage.byItem, Storage.getMap()),
+    getBatchEntries: (selection) => {
+        const entries = {};
+        if (!selection.category) return entries;
+        const map = Storage.getMap();
+        for (const { bid, category, link } of ListPage.byItem.values()) {
+            if (hasOwn(map, bid) || hasOwn(entries, bid) || !Category.matches(category, selection)) continue;
+            const title = readTitle(link);
+            if (title) entries[bid] = { title, ...category };
+        }
+        return entries;
+    },
 
-    mountSummary: () => {
+    mountSummary: (openCategoryPanel) => {
         const root = document.querySelector(SELECTORS.listLayouts.map((layout) => layout.root).join(", "));
         if (ListPage.summary?.root === root) return;
         ListPage.summary?.toolbar.remove();
@@ -100,7 +120,12 @@ export const ListPage = {
         toggle.type = "button";
         toggle.className = "qd-list-action";
         toggle.onclick = () => ListPage.setReveal(!ListPage.reveal);
-        toolbar.append(status, toggle);
+        const categories = document.createElement("button");
+        categories.type = "button";
+        categories.className = "qd-list-action";
+        categories.textContent = "按分类屏蔽";
+        categories.onclick = openCategoryPanel;
+        toolbar.append(status, toggle, categories);
         document.body.append(toolbar);
         ListPage.summary = { root, toolbar, status, toggle };
         ListPage.renderSummary();
@@ -108,7 +133,7 @@ export const ListPage = {
     setReveal: (reveal) => {
         ListPage.reveal = reveal;
         ListPage.blocked.forEach((bid) => {
-            ListPage.byBid.get(bid).forEach(({ item }) => ListPage.setVisibility(item, true));
+            ListPage.byBid.get(bid).forEach(({ item, blocked }) => ListPage.setVisibility(item, blocked));
         });
         ListPage.renderSummary();
     },
@@ -118,9 +143,9 @@ export const ListPage = {
     },
     renderSummary: () => {
         if (!ListPage.summary) return;
-        const { toolbar, status, toggle } = ListPage.summary;
+        const { status, toggle } = ListPage.summary;
         const count = ListPage.blocked.size;
-        toolbar.hidden = count === 0 && !ListPage.reveal;
+        status.hidden = toggle.hidden = count === 0 && !ListPage.reveal;
         const message = `${ListPage.reveal ? "临时显示已屏蔽作品" : "已隐藏"} ${count} 本`;
         if (status.textContent !== message) status.textContent = message;
         const action = ListPage.reveal ? "恢复隐藏" : "临时显示";
@@ -168,7 +193,7 @@ export const ListPage = {
         btn.addEventListener("click", async (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const title = (link.getAttribute("title") || link.textContent).trim();
+            const title = readTitle(link);
             if (!title) {
                 alert("未能读取书名，屏蔽失败。");
                 return;

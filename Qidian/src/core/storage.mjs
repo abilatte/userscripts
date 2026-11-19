@@ -1,4 +1,4 @@
-import { BID_PATTERN, diffBlocklist, hasOwn, normalizeBlocklist } from "./blocklist.mjs";
+import { BID_PATTERN, Category, diffBlocklist, hasOwn, normalizeBlocklist } from "./blocklist.mjs";
 import { emptySyncState, hasPending, journalChanges } from "./sync-state.mjs";
 
 const STORAGE_KEY = "qidian_blocked_map_v5";
@@ -12,6 +12,7 @@ export const Storage = {
     _listeners: [],
     _snapshotListeners: [],
     _localChangeListeners: [],
+    _categoryRuleListeners: [],
 
     read: () => {
         const saved = GM_getValue(DATA_KEY, null);
@@ -29,11 +30,15 @@ export const Storage = {
     },
     getData: () => Storage._data ??= Storage.read(),
     getMap: () => Storage.getData().map,
+    getCategoryRules: () => Storage.getData().categoryRules ?? [],
     accept: (data) => {
         const previous = Storage._data;
         if (previous && data.revision <= previous.revision) return;
         Storage._data = data;
         Storage._snapshotListeners.forEach((fn) => fn(data));
+        if ((data.categoryRulesRevision ?? 0) !== (previous?.categoryRulesRevision ?? 0)) {
+            Storage._categoryRuleListeners.forEach((fn) => fn());
+        }
         if (!previous || data.mapRevision !== previous.mapRevision) {
             Storage._listeners.forEach((fn) => fn(data.map, previous?.map));
         }
@@ -54,7 +59,8 @@ export const Storage = {
             Storage.accept(current);
             const next = { ...current };
             result = edit(next);
-            if (next.map === current.map && next.config === current.config && next.sync === current.sync) return;
+            if (next.map === current.map && next.config === current.config && next.sync === current.sync &&
+                next.categoryRules === current.categoryRules) return;
             next.revision++;
             if (next.map !== current.map) next.mapRevision++;
             localStorage.setItem(STORAGE_LOCK, String(next.revision));
@@ -86,6 +92,7 @@ export const Storage = {
     onChange: (fn) => Storage._listeners.push(fn),
     onSnapshot: (fn) => Storage._snapshotListeners.push(fn),
     onLocalChange: (fn) => Storage._localChangeListeners.push(fn),
+    onCategoryRulesChange: (fn) => Storage._categoryRuleListeners.push(fn),
     reportError: (err) => {
         console.error("QidianBlocker Storage Error:", err);
         alert(`屏蔽列表操作失败：${err.message}`);
@@ -98,6 +105,27 @@ export const Storage = {
             map[bid] = { title: title, time: Date.now(), ...category };
         });
     },
+    addMany: (entries) => Storage.changeMap((map) => {
+        const time = Date.now();
+        const added = [];
+        for (const [bid, entry] of Object.entries(entries)) {
+            if (!BID_PATTERN.test(bid) || !entry.title) throw new Error(`invalid book: ${bid}`);
+            if (hasOwn(map, bid)) continue;
+            map[bid] = { ...entry, time };
+            added.push(bid);
+        }
+        return added;
+    }),
+    setCategoryRule: (selection, enabled) => Storage.transact((data) => {
+        const rule = Category.build(selection.category?.trim(), selection.subCategory?.trim());
+        if (!rule.category) throw new Error("请选择大类");
+        const rules = data.categoryRules ?? [];
+        const existing = rules.find((candidate) => Category.same(candidate, rule));
+        if (Boolean(existing) === enabled) return false;
+        data.categoryRules = enabled ? [...rules, rule] : rules.filter((candidate) => candidate !== existing);
+        data.categoryRulesRevision = (data.categoryRulesRevision ?? 0) + 1;
+        return true;
+    }),
     // 只补缺失的分区字段，已有的不覆盖
     fillCategories: (updates) => {
         const entries = Object.entries(updates).filter(([, category]) => category.category || category.subCategory);
