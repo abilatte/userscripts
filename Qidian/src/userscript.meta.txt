@@ -3,8 +3,8 @@
 // @name:en      Qidian Novel Blocker
 // @namespace    abilatte
 // @version      2.8
-// @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精准屏蔽，支持图文/文字两种列表模式，详情页一键屏蔽，管理面板支持搜索、排序、批量移除与导入导出。
-// @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, in both image and text list modes, with a one-click button on detail pages and a management panel supporting search, sorting, batch removal, and import/export.
+// @description  屏蔽起点「全部作品」页中不感兴趣的小说：按书籍 ID 精确屏蔽，支持图文/文字两种列表模式及内置无缝翻页、按分类批量屏蔽与自动规则，详情页一键屏蔽，管理面板支持搜索、排序、批量移除、导入导出与 GitHub 多设备同步。
+// @description:en  Hide unwanted novels on Qidian's "All Works" page by book ID, supporting both cover and text list modes with seamless pagination, category batch blocking and auto rules, one-click detail page blocking, and a management panel with search, sorting, batch removal, import/export, and GitHub sync.
 // @author       abilatte
 // @match        https://www.qidian.com/all*
 // @match        https://www.qidian.com/book/*

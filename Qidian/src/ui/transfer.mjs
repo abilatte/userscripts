@@ -1,17 +1,17 @@
-import { normalizeBlocklist } from "../core/blocklist.mjs";
+import { normalizeBlocklist, serializeBlocklist } from "../core/blocklist.mjs";
 import { pad } from "../core/date.mjs";
 import { Storage } from "../core/storage.mjs";
 
 export const Transfer = {
     exportFile: () => {
-        const blob = new Blob([JSON.stringify(Storage.getMap(), null, 2)], { type: "application/json" });
+        const blob = new Blob([serializeBlocklist(Storage.getMap())], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const d = new Date();
         const a = document.createElement("a");
         a.href = url;
         a.download = `qidian_blocklist_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.json`;
         a.click();
-        URL.revokeObjectURL(url);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
     },
     importFile: () => {
         const input = document.createElement("input");

@@ -2,30 +2,25 @@ import { Category } from "../core/blocklist.mjs";
 import { Storage } from "../core/storage.mjs";
 import { ListPage } from "../pages/list.mjs";
 
-const sortNames = (names) => [...names].sort((a, b) => a.localeCompare(b, "zh"));
+const zhCollator = new Intl.Collator("zh");
+const sortNames = (names) => [...names].sort((a, b) => zhCollator.compare(a, b));
 
 function fillSelect(select, names, label) {
     const value = select.value;
-    select.replaceChildren(new Option(label, ""), ...names.map((name) => new Option(name, name)));
+    const nextOptions = [[label, ""], ...names.map((name) => [name, name])];
+    const unchanged = select.options.length === nextOptions.length &&
+        nextOptions.every(([text, val], i) => select.options[i].text === text && select.options[i].value === val);
+    if (!unchanged) {
+        select.replaceChildren(...nextOptions.map(([text, val]) => new Option(text, val)));
+    }
     select.value = names.includes(value) ? value : "";
 }
 
 export const CategoryPanel = {
     els: null,
 
-    open: () => {
-        if (CategoryPanel.els) {
-            CategoryPanel.els.category.focus();
-            return;
-        }
-        const dialog = document.createElement("dialog");
-        dialog.className = "qd-category-dialog";
-        dialog.setAttribute("aria-labelledby", "qd-category-title");
-        dialog.innerHTML = `
-            <div class="qd-modal-header">
-                <h2 class="qd-modal-title" id="qd-category-title">按分类屏蔽</h2>
-                <button type="button" class="qd-btn qd-btn-close" data-el="close" aria-label="关闭">×</button>
-            </div>
+    mount: (container, { isListPage = false } = {}) => {
+        container.innerHTML = `
             <div class="qd-category-content">
                 <div class="qd-category-fields">
                     <label>大类 <select class="qd-select" data-el="category"></select></label>
@@ -35,19 +30,17 @@ export const CategoryPanel = {
                     <button type="button" class="qd-btn qd-btn-danger" data-el="batch">屏蔽已加载的书</button>
                     <button type="button" class="qd-btn" data-el="addRule">添加自动屏蔽规则</button>
                 </div>
+                <p class="qd-category-note" data-el="batchHint" hidden>如需批量屏蔽当前页面已加载的书目，请在「全部作品」列表页打开此面板。</p>
                 <p class="qd-category-feedback" data-el="status" role="status"></p>
                 <h3>自动屏蔽规则</h3>
                 <p class="qd-category-note">规则会隐藏之后遇到的同类书，保存在当前浏览器。</p>
                 <ul class="qd-category-rules" data-el="rules"></ul>
             </div>
         `;
-        const els = { dialog, busy: false };
-        dialog.querySelectorAll("[data-el]").forEach((el) => { els[el.dataset.el] = el; });
-        els.close.onclick = () => dialog.close();
-        dialog.addEventListener("close", () => {
-            CategoryPanel.els = null;
-            dialog.remove();
-        }, { once: true });
+        const els = { container, isListPage, busy: false };
+        container.querySelectorAll("[data-el]").forEach((el) => { els[el.dataset.el] = el; });
+        els.batch.hidden = !isListPage;
+        els.batchHint.hidden = isListPage;
         els.category.onchange = () => {
             els.subCategory.value = "";
             els.status.textContent = "";
@@ -59,11 +52,16 @@ export const CategoryPanel = {
         };
         els.batch.onclick = CategoryPanel.blockLoaded;
         els.addRule.onclick = () => CategoryPanel.saveRule(CategoryPanel.selection(), true);
-        document.body.append(dialog);
         CategoryPanel.els = els;
         CategoryPanel.refresh();
-        dialog.showModal();
-        els.category.focus();
+    },
+
+    unmount: () => {
+        CategoryPanel.els = null;
+    },
+
+    focus: () => {
+        CategoryPanel.els?.category.focus();
     },
 
     selection: () => {
@@ -113,15 +111,20 @@ export const CategoryPanel = {
         };
         ListPage.byItem.forEach((record) => addCategory(record.category));
         rules.forEach(addCategory);
+        Object.values(Storage.getMap()).forEach(addCategory);
         fillSelect(els.category, sortNames(categories.keys()), categories.size ? "选择大类" : "暂无可选大类");
         fillSelect(els.subCategory, sortNames(categories.get(els.category.value) ?? []), "整个大类");
         els.subCategory.disabled = !els.category.value;
 
         const selection = CategoryPanel.selection();
-        const count = Object.keys(ListPage.getBatchEntries(selection)).length;
+        const count = els.isListPage ? Object.keys(ListPage.getBatchEntries(selection)).length : 0;
+        const coveredByCategory = Boolean(selection.subCategory) && rules.some((rule) =>
+            !rule.subCategory && rule.category === selection.category);
+        const exactExists = rules.some((rule) => Category.same(rule, selection));
         els.batch.textContent = selection.category ? `屏蔽已加载的 ${count} 本` : "屏蔽已加载的书";
         els.batch.disabled = !count || els.busy;
-        els.addRule.disabled = !selection.category || els.busy || rules.some((rule) => Category.same(rule, selection));
+        els.addRule.disabled = !selection.category || els.busy || exactExists || coveredByCategory;
+        els.addRule.textContent = coveredByCategory ? "已被大类规则覆盖" : "添加自动屏蔽规则";
         els.rules.replaceChildren(...rules.map((rule) => {
             const item = document.createElement("li");
             const label = document.createElement("span");

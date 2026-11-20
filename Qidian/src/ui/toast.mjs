@@ -21,13 +21,26 @@ export const Toast = {
             onAction();
         };
         el.append(text, action);
-        document.body.appendChild(el);
+        if (typeof el.showPopover === "function") {
+            el.popover = "manual";
+            document.body.appendChild(el);
+            el.showPopover();
+        } else {
+            document.body.appendChild(el);
+        }
         Toast.el = el;
         Toast.timer = setTimeout(Toast.hide, TOAST_DURATION);
     },
     hide: () => {
         clearTimeout(Toast.timer);
-        if (Toast.el) Toast.el.remove();
+        if (Toast.el) {
+            try {
+                Toast.el.hidePopover?.();
+            } catch {
+                // 忽略已脱离顶层的提示条
+            }
+            Toast.el.remove();
+        }
         Toast.el = null;
     }
 };

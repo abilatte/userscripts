@@ -18,6 +18,9 @@ export const Category = {
         return Category.build(readName(selectors.category), readName(selectors.subCategory));
     },
     isMissing: (entry) => !entry.category || !entry.subCategory,
+    canFill: (entry, incoming) => Boolean(entry && incoming && (
+        (!entry.category && incoming.category) || (!entry.subCategory && incoming.subCategory)
+    )),
     same: (a, b) => a.category === b.category && a.subCategory === b.subCategory,
     matches: (entry, rule) => entry.category === rule.category &&
         (!rule.subCategory || entry.subCategory === rule.subCategory),
@@ -65,4 +68,11 @@ export const diffBlocklist = (oldMap, newMap) => {
         upsert: Object.keys(newMap).filter((bid) => !hasOwn(oldMap, bid) || !same(oldMap[bid], newMap[bid])),
         remove: Object.keys(oldMap).filter((bid) => !hasOwn(newMap, bid))
     };
+};
+
+// 每本书一行、按 ID 排序、字段顺序固定：同样的数据总是得到同样的文本，便于比较，也便于在 GitHub 上看每次提交的差异
+export const serializeBlocklist = (map) => {
+    const lines = Object.keys(map).sort()
+        .map((bid) => `  ${JSON.stringify(bid)}: ${JSON.stringify(normalizeEntry(map[bid]))}`);
+    return lines.length ? `{\n${lines.join(",\n")}\n}\n` : "{}\n";
 };

@@ -1,4 +1,4 @@
-import { diffBlocklist, hasOwn, normalizeBlocklist, normalizeEntry } from "./blocklist.mjs";
+import { diffBlocklist, hasOwn, normalizeBlocklist, serializeBlocklist } from "./blocklist.mjs";
 import { formatDate } from "./date.mjs";
 import { Storage } from "./storage.mjs";
 import { emptySyncState, hasPending } from "./sync-state.mjs";
@@ -26,10 +26,47 @@ const Base64 = {
         return btoa(binary);
     },
     decode: (base64) => {
-        const binary = atob(base64.replace(/\s/g, ""));
-        return new TextDecoder().decode(Uint8Array.from(binary, (ch) => ch.charCodeAt(0)));
+        const clean = base64.replace(/\s/g, "");
+        if (typeof Uint8Array.fromBase64 === "function") {
+            return new TextDecoder().decode(Uint8Array.fromBase64(clean));
+        }
+        const binary = atob(clean);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new TextDecoder().decode(bytes);
     }
 };
+
+function parseJson(res) {
+    try {
+        return JSON.parse(res.responseText);
+    } catch {
+        throw new Error("GitHub 返回了无法解析的响应，请检查网络或代理");
+    }
+}
+
+function readHeader(headers, name) {
+    if (!headers || typeof headers !== "string") return null;
+    const target = name.toLowerCase();
+    for (const line of headers.split(/\r?\n/)) {
+        const idx = line.indexOf(":");
+        if (idx > 0 && line.slice(0, idx).trim().toLowerCase() === target) {
+            return line.slice(idx + 1).trim() || null;
+        }
+    }
+    return null;
+}
+
+function isMissingShaConflict(res) {
+    if (!res.responseText) return true;
+    try {
+        const payload = JSON.parse(res.responseText);
+        if (!payload || typeof payload !== "object") return true;
+        return typeof payload.message !== "string" || /\bsha\b/i.test(payload.message);
+    } catch {
+        return true;
+    }
+}
 
 export const Sync = {
     _active: null,
@@ -83,20 +120,16 @@ export const Sync = {
     },
 
     // 每本书一行、按 ID 排序、字段顺序固定：同样的数据总是得到同样的文本，便于比较，也便于在 GitHub 上看每次提交的差异
-    serialize: (map) => {
-        const lines = Object.keys(map).sort()
-            .map((bid) => `  ${JSON.stringify(bid)}: ${JSON.stringify(normalizeEntry(map[bid]))}`);
-        return lines.length ? `{\n${lines.join(",\n")}\n}\n` : "{}\n";
-    },
+    serialize: serializeBlocklist,
 
-    request: async (active, method, path, body) => {
+    request: async (active, method, path, body, extraHeaders) => {
         const { pending } = await Sync.transact(active, () => ({
             // 锁内发起请求，锁外等待响应。请求期间仍可编辑书单或切换配置。
-            pending: Sync.send(active, method, path, body)
+            pending: Sync.send(active, method, path, body, extraHeaders)
         }));
         return pending;
     },
-    send: (active, method, path, body) => {
+    send: (active, method, path, body, extraHeaders) => {
         const signal = active.controller.signal;
         let abort;
         const pending = new Promise((resolve, reject) => {
@@ -107,7 +140,8 @@ export const Sync = {
                     "Accept": "application/vnd.github+json",
                     "Authorization": `Bearer ${active.config.token}`,
                     "X-GitHub-Api-Version": "2022-11-28",
-                    ...(body ? { "Content-Type": "application/json" } : {})
+                    ...(body ? { "Content-Type": "application/json" } : {}),
+                    ...extraHeaders
                 },
                 data: body ? JSON.stringify(body) : undefined,
                 timeout: SYNC_TIMEOUT,
@@ -131,20 +165,23 @@ export const Sync = {
         const reasons = {
             401: "令牌无效或已过期",
             403: "令牌权限不足，或触发了 GitHub 的访问频率限制",
-            404: "仓库不存在，或令牌无权访问该仓库"
+            404: "仓库不存在，或令牌无权访问该仓库",
+            422: "文件路径或提交参数无效（GitHub 返回 422）"
         };
         throw new Error(reasons[res.status] || `GitHub 返回了 ${res.status}`);
     },
     contentsPath: (config) => `/repos/${config.repo}/contents/${config.path.split("/").map(encodeURIComponent).join("/")}`,
 
-    // 返回 { sha, map }；文件还不存在时返回 null
-    fetchRemote: async (active) => {
+    // 返回 { sha, etag, map }、{ notModified: true }；文件还不存在时返回 null
+    fetchRemote: async (active, etag = null) => {
         const { config } = active;
-        // GitHub 的响应带 max-age=60，不加时间戳可能读到刚上传之前的旧版本
-        const res = await Sync.request(active, "GET", `${Sync.contentsPath(config)}?t=${Date.now()}`);
+        // GitHub 的响应带 max-age=60，有 ETag 时用条件请求校验，否则加时间戳绕过缓存
+        const path = etag ? Sync.contentsPath(config) : `${Sync.contentsPath(config)}?t=${Date.now()}`;
+        const res = await Sync.request(active, "GET", path, undefined, etag ? { "If-None-Match": etag } : undefined);
+        if (res.status === 304) return { notModified: true };
         if (res.status === 404) return null;
         Sync.assertOk(res);
-        const meta = JSON.parse(res.responseText);
+        const meta = parseJson(res);
         if (Array.isArray(meta) || meta.type !== "file") throw new Error("同步路径指向的不是文件");
 
         let content = meta.content;
@@ -152,7 +189,7 @@ export const Sync = {
             // 超过 1MB 的文件不随元数据返回内容
             const blobRes = await Sync.request(active, "GET", `/repos/${config.repo}/git/blobs/${meta.sha}`);
             Sync.assertOk(blobRes);
-            content = JSON.parse(blobRes.responseText).content;
+            content = parseJson(blobRes).content;
         }
 
         let raw;
@@ -167,7 +204,7 @@ export const Sync = {
         if (Object.values(raw).some((entry) => !Sync.isRemoteEntry(entry))) throw invalid();
         const { map, skipped } = normalizeBlocklist(raw);
         if (skipped) throw invalid();
-        return { sha: meta.sha, map };
+        return { sha: meta.sha, etag: readHeader(res.responseHeaders, "etag"), map };
     },
     isRemoteEntry: (entry) => {
         if (typeof entry === "string") return true;
@@ -187,10 +224,12 @@ export const Sync = {
             content: Base64.encode(text),
             ...(sha ? { sha: sha } : {})
         });
-        // 409：sha 与远端不符；422：文件已存在但没有带 sha（读取时文件还不存在）
-        if (res.status === 409 || res.status === 422) return { conflict: true };
+        // 409：sha 与远端不符；422 且未传 sha 且提示缺 sha：文件已存在（读取时还不存在）
+        if (res.status === 409 || (res.status === 422 && !sha && isMissingShaConflict(res))) {
+            return { conflict: true };
+        }
         Sync.assertOk(res);
-        return { sha: JSON.parse(res.responseText).content.sha };
+        return { sha: parseJson(res).content.sha };
     },
 
     // 把远端的新内容合并进本机
@@ -204,7 +243,9 @@ export const Sync = {
             // 首次同步：两边的记录都保留，同一本书合并字段
             Object.keys(local).forEach((bid) => { merged[bid] = { ...remote.map[bid], ...local[bid] }; });
         } else {
-            state.upsert.forEach((bid) => { if (hasOwn(local, bid)) merged[bid] = local[bid]; });
+            state.upsert.forEach((bid) => {
+                if (hasOwn(local, bid)) merged[bid] = { ...remote.map[bid], ...local[bid] };
+            });
         }
         state.remove.forEach((bid) => delete merged[bid]);
         // 首次合并带入的本地记录也要进入待上传记录，冲突重试才能继续保留它们。
@@ -212,27 +253,57 @@ export const Sync = {
         data.sync = { ...state, ...diffBlocklist(remote.map, merged), sha: remote.sha };
     },
     // 本机的 uploaded 这份数据已与远端一致；请求期间又发生的本地改动留到下一次上传
-    settle: async (active, uploaded, sha) => {
+    settle: async (active, uploaded, sha, etag = null) => {
         const pending = await Sync.transact(active, (data) => {
             const changes = diffBlocklist(uploaded, data.map);
             const now = Date.now();
-            data.sync = { ...changes, sha, lastCheckTime: now, lastSyncTime: now, lastError: "" };
+            data.sync = { ...changes, sha, etag, lastCheckTime: now, lastSyncTime: now, lastError: "" };
             return hasPending(changes);
         });
         if (pending) Sync.schedule();
     },
     syncOnce: async (active, attempt = 0) => {
-        const remote = await Sync.fetchRemote(active);
+        const etag = await Sync.transact(active, (data) => (
+            attempt === 0 && data.sync.sha !== null && data.sync.etag ? data.sync.etag : null
+        ));
+        const remote = await Sync.fetchRemote(active, etag);
+        if (remote?.notModified) {
+            const pushPlan = await Sync.transact(active, (data) => {
+                if (!hasPending(data.sync)) {
+                    data.sync = { ...data.sync, lastCheckTime: Date.now(), lastError: "" };
+                    return null;
+                }
+                return { map: data.map, sha: data.sync.sha };
+            });
+            if (!pushPlan) return;
+
+            const result = await Sync.pushRemote(
+                active,
+                Sync.serialize(pushPlan.map),
+                Object.keys(pushPlan.map).length,
+                pushPlan.sha
+            );
+            if (result.conflict) {
+                if (attempt >= SYNC_MAX_CONFLICT_RETRIES) {
+                    throw new Error("远端数据正在被其他设备修改，请稍后重试");
+                }
+                await Sync.syncOnce(active, attempt + 1);
+                return;
+            }
+            await Sync.settle(active, pushPlan.map, result.sha, null);
+            return;
+        }
+
         const local = await Sync.transact(active, (data) => {
             if (remote) Sync.mergeRemote(data, remote);
             return data.map;
         });
-        const text = Sync.serialize(local);
-        if (remote && text === Sync.serialize(remote.map)) {
-            await Sync.settle(active, local, remote.sha);
+        if (remote && !hasPending(diffBlocklist(remote.map, local))) {
+            await Sync.settle(active, local, remote.sha, remote.etag);
             return;
         }
 
+        const text = Sync.serialize(local);
         const result = await Sync.pushRemote(active, text, Object.keys(local).length, remote ? remote.sha : null);
         if (result.conflict) {
             if (attempt >= SYNC_MAX_CONFLICT_RETRIES) {
@@ -241,7 +312,7 @@ export const Sync = {
             await Sync.syncOnce(active, attempt + 1);
             return;
         }
-        await Sync.settle(active, local, result.sha);
+        await Sync.settle(active, local, result.sha, null);
     },
 
     // force：忽略检查间隔；pushOnly：只在有改动等待上传时才同步。

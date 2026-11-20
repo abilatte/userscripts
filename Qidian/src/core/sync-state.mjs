@@ -1,6 +1,7 @@
 // sha 是待上传改动所基于的远端版本，null 表示尚未建立基线。
 export const emptySyncState = () => ({
     sha: null,
+    etag: null,
     upsert: [],
     remove: [],
     lastSyncTime: 0,
