@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         小说阅读模式
 // @namespace    novel-reader
-// @version      0.2.1
+// @version      0.2.2
 // @author       Abilatte
 // @description  在第三方小说站提供起点风格的阅读模式：滚动/章节翻页、目录、简繁转换、站点点选适配
 // @homepageURL  https://github.com/abilatte/userscripts
