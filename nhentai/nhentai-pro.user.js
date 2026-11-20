@@ -3,7 +3,7 @@
 // @name:en nhentai Pro
 // @namespace https://github.com/abilatte
 // @homepageURL https://github.com/abilatte/userscripts
-// @version 2.8.2.18
+// @version 2.8.2.19
 // @description 中文搜索标签、全站标签汉化、封面悬停预览、卷轴阅读、无限滚动与语言筛选
 // @description:en Chinese tag search, site-wide tag translation, cover hover preview, scroll reader, infinite scroll and language filter.
 // @author abilatte
@@ -91,6 +91,7 @@
     const API_ENDPOINTS = {
         galleryV2: (id) => `/api/v2/galleries/${id}`,
         legacyGallery: (id) => `/api/gallery/${id}`,
+        popularGalleries: '/api/v2/galleries/popular',
         cdnConfig: '/api/v2/cdn',
         blacklist: '/api/v2/blacklist',
         blacklistIds: '/api/v2/blacklist/ids'
@@ -302,6 +303,8 @@
     const Dict = {
         Nav: {
             "Login": "登录",
+            "Sign in": "登录",
+            "Sign In": "登录",
             "Register": "注册",
             "Log out": "注销",
             "Log Out": "注销",
@@ -311,7 +314,10 @@
             "New Uploads": "最新上传",
             "Popular Now": "当前热门",
             "Uploaded": "上传时间",
-            "Popular": "热门"
+            "Popular": "热门",
+            "Community": "社区",
+            "Taxonomy": "标签分类",
+            "GTS Backlog": "待审标签"
         },
         Meta: {
             "Title": "标题",
@@ -397,7 +403,9 @@
             "Category": "分类",
             "Black": "黑色",
             "Blue": "蓝色",
-            "Light": "浅色"
+            "Light": "浅色",
+            "Pending": "待定",
+            "pending": "待定"
         },
         SiteUI: {
             "Username": "用户名",
@@ -429,6 +437,23 @@
             "Download Torrent": "下载种子",
             "Show all": "显示全部",
             "More like this": "相似推荐",
+            "More Like This": "相似推荐",
+            "Save this search": "保存此搜索",
+            "☆ Save this search": "☆ 保存此搜索",
+            "★ Saved": "★ 已保存",
+            "Saved searches": "已保存的搜索",
+            "Recent searches": "最近搜索",
+            "Search for": "搜索",
+            "Search title text": "搜索标题文本",
+            "Search Japanese title": "搜索日文标题",
+            "Name (optional)": "名称（选填）",
+            "Leave blank to use the query": "留空则使用搜索词本身",
+            "You need to log in to add favorites": "登录后才能添加收藏",
+            "You need to log in to download": "登录后才能下载",
+            "Log in to vote": "登录后参与投票",
+            "help shape this gallery's tags": "协助完善本画廊的标签",
+            "You're leaving nhentai": "即将离开 nhentai",
+            "Open in new tab": "在新标签页打开",
             "Are you sure you want to log out?": "真的要注销吗？",
             "No, take me back": "不，回到之前的页面",
             "No, take me back.": "不，回到之前的页面。",
@@ -512,7 +537,12 @@
         'Groups': '社团',
         'Info': '关于',
         'Favorites': '收藏',
-        'Log out': '注销'
+        'Log out': '注销',
+        'Sign in': '登录',
+        'Register': '注册',
+        'Community': '社区',
+        'Taxonomy': '标签分类',
+        'GTS Backlog': '待审标签'
     };
 
     const specialTagValueTranslations = {
@@ -618,9 +648,11 @@
     }
 
     function isUserLoggedIn() {
+        const bridgeUser = window.nhentai_userscript_v1?.get?.()?.user || window.nhentai_data_v1?.user;
+        if (bridgeUser && Number(bridgeUser.id) > 0) return true;
         const app = window._n_app ?? window.n ?? null;
         if (Array.isArray(app?.options?.blacklisted_tags)) return true;
-        return !queryOne(document, '.menu-sign-in a[href="/login/"]');
+        return !queryOne(document, '.menu-sign-in a[href^="/login"]');
     }
 
     // ===== 3.3 官方 userscript bridge 与原始事件兜底 =====
@@ -842,20 +874,33 @@
             const url = api?.cdn?.image?.(path, attempt);
             return typeof url === 'string' ? url : '';
         },
+        getThumbUrl(path = '', attempt = 0) {
+            if (!path) return '';
+            const api = this.getApi();
+            const url = api?.cdn?.thumb?.(path, attempt);
+            return typeof url === 'string' ? url : '';
+        },
         syncCdnFromPageData() {
             const data = this.getData();
             const servers = data?.cdn?.image_servers;
+            const thumbServers = data?.cdn?.thumb_servers;
+            let synced = false;
             if (Array.isArray(servers) && servers.length) {
                 CDN.imageServers = servers;
-                return true;
+                synced = true;
             }
-            return false;
+            if (Array.isArray(thumbServers) && thumbServers.length) {
+                CDN.thumbServers = thumbServers;
+                synced = true;
+            }
+            return synced;
         }
     };
 
     // ===== 3.4 CDN 与图片候选地址 =====
     const CDN = {
-        imageServers: ['https://i1.nhentai.net'],
+        imageServers: ['https://i1.nhentai.net', 'https://i2.nhentai.net', 'https://i3.nhentai.net', 'https://i4.nhentai.net'],
+        thumbServers: ['https://t1.nhentai.net', 'https://t2.nhentai.net', 'https://t3.nhentai.net', 'https://t4.nhentai.net'],
         loadPromise: null,
         ensure() {
             if (this.loadPromise) return this.loadPromise;
@@ -874,6 +919,9 @@
                     if (Array.isArray(data.image_servers) && data.image_servers.length) {
                         this.imageServers = data.image_servers;
                     }
+                    if (Array.isArray(data.thumb_servers) && data.thumb_servers.length) {
+                        this.thumbServers = data.thumb_servers;
+                    }
                     return this.imageServers;
                 })
                 .catch(err => {
@@ -885,6 +933,12 @@
         buildImageUrl(path = '') {
             if (!path) return '';
             const base = (this.imageServers[0] || 'https://i1.nhentai.net').replace(/\/+$/, '');
+            const normalizedPath = String(path).replace(/^\/+/, '');
+            return `${base}/${normalizedPath}`;
+        },
+        buildThumbUrl(path = '') {
+            if (!path) return '';
+            const base = (this.thumbServers[0] || 'https://t1.nhentai.net').replace(/\/+$/, '');
             const normalizedPath = String(path).replace(/^\/+/, '');
             return `${base}/${normalizedPath}`;
         }
@@ -916,7 +970,8 @@
             urls.push(url);
         };
 
-        for (let attempt = 0; attempt < 3; attempt += 1) {
+        const attempts = Math.max(3, CDN.imageServers.length || 4);
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
             pushUrl(NhentaiUserscriptBridge.getImageUrl(path, attempt));
         }
 
@@ -936,12 +991,36 @@
             urls.push(url);
         };
 
-        buildPreferredImageUrls(path).forEach(pushUrl);
         buildOfficialImageUrls(path).forEach(pushUrl);
+        buildPreferredImageUrls(path).forEach(pushUrl);
+        return urls;
+    }
+
+    function buildThumbCandidateUrls(path = '') {
+        if (!path) return [];
+        if (/^(https?:)?\/\//.test(path)) return [path];
+        const urls = [];
+        const pushUrl = (url) => {
+            if (!url || urls.includes(url)) return;
+            urls.push(url);
+        };
+
+        const attempts = Math.max(3, CDN.thumbServers.length || 4);
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+            pushUrl(NhentaiUserscriptBridge.getThumbUrl(path, attempt));
+        }
+
+        CDN.thumbServers.forEach(server => {
+            pushUrl(buildImageUrlFromServer(server, path));
+        });
+
+        pushUrl(CDN.buildThumbUrl(path));
         return urls;
     }
 
     // ===== 3.5 画廊元数据归一化与列表辅助 =====
+    const galleryListMetaCache = new LRUCache(1500);
+
     function normalizeGalleryTagIds(data) {
         const rawTagIds = Array.isArray(data?.tag_ids) ? data.tag_ids : [];
         const fallbackTagIds = Array.isArray(data?.tags)
@@ -986,6 +1065,9 @@
         }).filter(Boolean);
 
         const tagIds = normalizeGalleryTagIds(data);
+        const thumbnail = typeof data.thumbnail === 'string'
+            ? data.thumbnail
+            : (data.thumbnail?.path || data.cover?.path || '');
         return {
             galleryId: data.id || null,
             mediaId,
@@ -995,8 +1077,28 @@
             tagIds,
             blacklisted: data.blacklisted === true,
             tags: Array.isArray(data.tags) ? data.tags : [],
+            thumbnail,
+            thumbnailWidth: Number(data.thumbnail_width || data.thumbnail?.width || data.cover?.width) || 0,
+            thumbnailHeight: Number(data.thumbnail_height || data.thumbnail?.height || data.cover?.height) || 0,
+            englishTitle: data.english_title || data.title?.english || '',
+            japaneseTitle: data.japanese_title || data.title?.japanese || '',
             title: data.title?.english || data.title?.japanese || data.title?.pretty || data.english_title || data.japanese_title || ''
         };
+    }
+
+    function rememberGalleryListEntries(entries = []) {
+        if (!Array.isArray(entries)) return [];
+        const normalizedList = [];
+        entries.forEach(entry => {
+            const id = String(entry?.id || entry?.galleryId || '');
+            if (!id) return;
+            const meta = (entry?.galleryId && Array.isArray(entry?.tag_ids))
+                ? entry
+                : normalizeGalleryMeta(entry);
+            galleryListMetaCache.set(id, meta);
+            normalizedList.push(meta);
+        });
+        return normalizedList;
     }
 
     function getGalleryNodeId(gallery) {
@@ -1010,10 +1112,16 @@
     function getGalleryNodeListMeta(gallery) {
         const id = getGalleryNodeId(gallery);
         if (!id) return null;
+        const cached = galleryListMetaCache.get(id);
+        if (cached) return cached;
         const data = NhentaiUserscriptBridge.getData();
-        const entries = Array.isArray(data?.galleries) ? data.galleries : [];
-        const entry = entries.find(item => String(item?.id || '') === id);
-        return entry ? normalizeGalleryMeta(entry) : null;
+        if (Array.isArray(data?.galleries) && data.galleries.length) {
+            rememberGalleryListEntries(data.galleries);
+        }
+        if (Array.isArray(data?.gallery?.related) && data.gallery.related.length) {
+            rememberGalleryListEntries(data.gallery.related);
+        }
+        return galleryListMetaCache.get(id) || null;
     }
 
     function syncGalleryNodeMetaState(gallery) {
@@ -1110,10 +1218,11 @@
             --nh-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
         }
 
-        .nh-helper-suggestion-box { position: absolute; background: var(--nh-color-bg); border: 1px solid var(--nh-color-border); border-top: none; font-size: var(--nh-font-size-lg); color: var(--nh-color-text); z-index: 1001; width: 100%; max-height: 300px; overflow-y: auto; box-shadow: 0 8px 16px rgba(0,0,0,0.6); border-radius: 0 0 5px 5px; }
+        .nh-helper-suggestion-box { position: absolute; top: 100%; left: 0; right: 0; background: var(--nh-color-bg); border: 1px solid var(--nh-color-border); border-top: none; font-size: var(--nh-font-size-lg); color: var(--nh-color-text); z-index: 1001; width: 100%; max-height: 300px; overflow-y: auto; box-shadow: 0 8px 16px rgba(0,0,0,0.6); border-radius: 0 0 5px 5px; }
         .nh-helper-suggestion-box::-webkit-scrollbar { width: 6px; }
         .nh-helper-suggestion-box::-webkit-scrollbar-thumb { background: var(--nh-color-border); border-radius: 3px; }
         form[action="/search/"].nh-helper-cn-suggestion-active > [role="listbox"] { display: none !important; }
+        form[action="/search/"]:has(.nh-helper-suggestion-box) #nh-helper-quick-tags { display: none !important; }
         .nh-helper-suggestion-item { padding: 6px 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--nh-color-bg-elevated); display: flex; align-items: center; transition: background-color 0.1s; }
         .nh-helper-suggestion-item:hover, .nh-helper-suggestion-item.active { background-color: var(--nh-color-accent); color: #fff; }
         body.nh-shift-pressed .nh-helper-suggestion-item:hover, body.nh-shift-pressed .nh-helper-suggestion-item.active { background-color: var(--nh-color-danger); }
@@ -1707,6 +1816,7 @@
         .nh-lang-item.selected .nh-lang-checkbox { background-color: var(--nh-color-accent); border-color: var(--nh-color-accent); }
         .nh-lang-item.selected .nh-lang-checkbox::after { content: "✓"; color: #fff; font-size: 10px; line-height: 1; }
         .nh-helper-hidden { display: none !important; }
+        .ad-wrapper, .advertisement { display: none !important; }
         .gallery.blacklisted,
         .gallery.nh-site-blacklisted {
             display: none !important;
@@ -2236,7 +2346,7 @@
         }
         .nh-reading-scrollbar-item {
             flex: 1 1 0;
-            min-height: 3px;
+            min-height: 0;
             padding: 0;
             border: none;
             border-radius: 0;
@@ -2662,6 +2772,7 @@
     const DB = {
         data: {},
         cnToItem: {},
+        cnByNs: {},
         indexReady: false,
         worker: null,
         workerUrl: null,
@@ -3031,18 +3142,31 @@
         },
         rebuildCnIndex() {
             const map = {};
+            const byNs = {};
             Object.keys(this.data || {}).forEach(ns => {
                 const bucket = this.data[ns];
                 if (!bucket) return;
+                const nsMap = byNs[ns] || (byNs[ns] = {});
                 Object.keys(bucket).forEach(en => {
                     const cn = bucket[en];
                     if (!cn || cn === '-') return;
                     const key = String(cn).trim().toLowerCase();
-                    if (!key || map[key]) return;
-                    map[key] = { value: en, namespace: ns, cn };
+                    if (!key) return;
+                    const item = { value: en, namespace: ns, cn };
+                    if (!nsMap[key]) nsMap[key] = item;
+                    if (!map[key]) map[key] = item;
                 });
             });
             this.cnToItem = map;
+            this.cnByNs = byNs;
+        },
+        lookupCnItem(term, nsHint = '') {
+            const key = String(term || '').trim().toLowerCase();
+            if (!key) return null;
+            if (nsHint && this.cnByNs[nsHint]?.[key]) {
+                return this.cnByNs[nsHint][key];
+            }
+            return this.cnToItem[key] || null;
         },
         // 标签链接只有 slug（x-ray 与 big breasts 都写成 a-b），按 slug 反查词库原始英文名；按命名空间懒构建。
         findKeyBySlug(ns, slug) {
@@ -3098,6 +3222,15 @@
                 'parody': 'parodies',
                 'character': 'characters',
                 'language': 'languages'
+            };
+            const NS_ALIAS_MAP = {
+                'tag': 'tag', 'tags': 'tag',
+                'category': 'tag', 'categories': 'tag',
+                'artist': 'artist', 'artists': 'artist',
+                'group': 'group', 'groups': 'group',
+                'parody': 'parody', 'parodies': 'parody',
+                'character': 'character', 'characters': 'character',
+                'language': 'language', 'languages': 'language'
             };
 
             self.onmessage = function(e) {
@@ -3223,48 +3356,60 @@
                 if (inputStr.trim() === '' || (inputStr.endsWith(' ') && tokens.length > 0 && inputStr.slice(inputStr.lastIndexOf(tokens[tokens.length - 1])).trim() === tokens[tokens.length - 1] && tokens[tokens.length - 1].endsWith('"'))) {
                     return [];
                 }
-                const words = inputStr.trim().split(/\\s+/);
-                if (words.length === 0) return [];
 
                 const matches = [];
-                const maxLookBack = 4;
-
-                // Only look at the last "word" chunk for suggestion
-                for (let i = Math.min(words.length, maxLookBack); i >= 1; i--) {
-                    const slice = words.slice(-i).join(' ');
-                    let searchNs = null;
-                    let searchTerm = slice;
-                    let prefix = '';
-
-                    const nsMatch = slice.match(/^(-?)([a-zA-Z0-9_]+):(.*)/);
-                    if (nsMatch) {
-                        prefix = nsMatch[1] + nsMatch[2] + ':';
-                        searchNs = nsMatch[2];
-                        if (searchNs.endsWith('s')) searchNs = searchNs.slice(0, -1);
-                        searchTerm = nsMatch[3];
-                    }
-
-                    const cleanTerm = searchTerm.replace(/^"|"$/g, '').toLowerCase();
-                    if (cleanTerm.length < 1) continue;
-
-                    // SELECT THE RIGHT BUCKET
+                const collectForSlice = (slice, searchNs, cleanTerm, lookBackSize, prefix) => {
+                    if (!cleanTerm || cleanTerm.length < 1) return;
                     let targetIndex = index.all;
                     let targetSortedIndex = sortedIndex.all;
                     if (searchNs && index[searchNs]) {
                         targetIndex = index[searchNs];
                         targetSortedIndex = sortedIndex[searchNs] || index[searchNs];
                     } else if (searchNs) {
-                        // Namespace exists but not in our DB (e.g. pages:), skip search or return empty
-                        continue;
+                        return;
                     }
 
-                    const tempResults = collectPrefixMatches(targetSortedIndex, cleanTerm, i, slice, prefix, 24);
+                    const tempResults = collectPrefixMatches(targetSortedIndex, cleanTerm, lookBackSize, slice, prefix, 24);
                     if (tempResults.length < 12) {
-                        const containsResults = collectContainsMatches(targetIndex, cleanTerm, i, slice, prefix, 12 - tempResults.length);
+                        const containsResults = collectContainsMatches(targetIndex, cleanTerm, lookBackSize, slice, prefix, 12 - tempResults.length);
                         tempResults.push(...containsResults);
                     }
                     tempResults.sort((a, b) => b.score - a.score);
                     matches.push(...tempResults.slice(0, 20));
+                };
+
+                // 处理未闭合引号（例如点击快捷标签产生的 tags:" 或 parodies:"big b），避免按空格拆分丢失命名空间约束。
+                const openQuoteMatch = inputStr.match(/(?:^|\\s)((-?)([a-zA-Z0-9_]+):)?"([^"]*)$/);
+                if (openQuoteMatch) {
+                    const slice = openQuoteMatch[0].replace(/^\\s+/, '');
+                    const prefix = openQuoteMatch[1] || '';
+                    const rawNs = (openQuoteMatch[3] || '').toLowerCase();
+                    const searchNs = rawNs ? (NS_ALIAS_MAP[rawNs] || rawNs) : null;
+                    const cleanTerm = openQuoteMatch[4].trim().toLowerCase();
+                    collectForSlice(slice, searchNs, cleanTerm, 2, prefix);
+                } else {
+                    const words = inputStr.trim().split(/\\s+/);
+                    if (words.length === 0) return [];
+                    const maxLookBack = 4;
+
+                    // Only look at the last "word" chunk for suggestion
+                    for (let i = Math.min(words.length, maxLookBack); i >= 1; i--) {
+                        const slice = words.slice(-i).join(' ');
+                        let searchNs = null;
+                        let searchTerm = slice;
+                        let prefix = '';
+
+                        const nsMatch = slice.match(/^(-?)([a-zA-Z0-9_]+):(.*)/);
+                        if (nsMatch) {
+                            prefix = nsMatch[1] + nsMatch[2] + ':';
+                            const rawNs = nsMatch[2].toLowerCase();
+                            searchNs = NS_ALIAS_MAP[rawNs] || rawNs;
+                            searchTerm = nsMatch[3];
+                        }
+
+                        const cleanTerm = searchTerm.replace(/^"|"$/g, '').toLowerCase();
+                        collectForSlice(slice, searchNs, cleanTerm, i, prefix);
+                    }
                 }
 
                 const uniqueMap = new Map();
@@ -3273,7 +3418,8 @@
                     const uniqueKey = m.item.namespace + ':' + m.item.value;
                     if (!uniqueMap.has(uniqueKey)) {
                         const pluralNs = NS_PLURAL_MAP[m.item.namespace] || m.item.namespace;
-                        const finalVal = \`\${pluralNs}:"\${m.item.value}"\`;
+                        const excludePrefix = m.nsPrefix && m.nsPrefix.startsWith('-') ? '-' : '';
+                        const finalVal = \`\${excludePrefix}\${pluralNs}:"\${m.item.value}"\`;
                         uniqueMap.set(uniqueKey, {
                             item: m.item,
                             finalValue: finalVal,
@@ -3337,7 +3483,7 @@
     // ===== 5. 搜索、翻译、语言筛选、设置 UI =====
     const SettingsUIDict = {
         'zh': {
-            "title": "nHentai Pro 设置 v2.8.2.18",
+            "title": "nHentai Pro 设置 v2.8.2.19",
             "tab_browse": "浏览",
             "tab_translate": "翻译",
             "tab_search": "搜索与筛选",
@@ -3522,7 +3668,7 @@
             "db_status_failed": "更新失败"
         },
         'en': {
-            "title": "nHentai Pro Settings v2.8.2.18",
+            "title": "nHentai Pro Settings v2.8.2.19",
             "tab_browse": "Browse",
             "tab_translate": "Translate",
             "tab_search": "Search",
@@ -3753,22 +3899,29 @@
 
     let langFilterOutsideClickBound = false;
 
-    function setupLanguageFilterUI() {
-        const navLeft = document.querySelector('ul.menu.left');
-        if (!navLeft) return;
-
-        Array.from(navLeft.children).forEach(child => {
+    function cleanNavbarPromoItems(container) {
+        if (!container) return;
+        Array.from(container.children).forEach(child => {
+            if (child.classList?.contains('dropdown')) return;
             const text = child.textContent.trim().toLowerCase();
             const link = child.querySelector('a');
-            const href = link ? link.href.toLowerCase() : '';
+            const href = (link?.getAttribute('href') || link?.href || '').toLowerCase();
 
-            const isAI = text.includes('ai jerk off') || text.includes('ai porn');
+            const isAI = text.includes('ai jerk off') || text.includes('ai porn') || text.includes('ai sluts') || href.includes('tsyndicate.com');
             const isTwitter = href.includes('twitter.com') || href.includes('x.com') || child.querySelector('.fa-twitter');
 
             if (isAI || isTwitter) {
                 child.remove();
             }
         });
+    }
+
+    function setupLanguageFilterUI() {
+        const navLeft = document.querySelector('ul.menu.left');
+        if (!navLeft) return;
+
+        cleanNavbarPromoItems(navLeft);
+        cleanNavbarPromoItems(navLeft.querySelector('ul.dropdown-menu'));
 
         if (!Config.get('showLangDropDown')) return;
 
@@ -3959,7 +4112,7 @@
                 </div>
                 <div class="nh-modal-tools">
                     <button type="button" id="nh-lang-switch" class="nh-btn nh-btn-secondary nh-lang-switch-btn">${lang === 'zh' ? 'English' : '中文'}</button>
-                    <span class="version">v2.8.2.18</span>
+                    <span class="version">v2.8.2.19</span>
                 </div>
             </div>
 
@@ -4386,7 +4539,7 @@
             SETTINGS_BACKUP_EXCLUDED_KEYS.forEach(key => delete settings[key]);
             const payload = {
                 app: SETTINGS_BACKUP_APP_ID,
-                version: '2.8.2.18',
+                version: '2.8.2.19',
                 exportedAt: new Date().toISOString(),
                 settings,
                 readingProgress: ReadingModeStorage.readAll()
@@ -4540,17 +4693,83 @@
         document.getElementById('nh-settings-cancel').onclick = () => closeModal();
         overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
 
+        const RELOAD_REQUIRED_KEYS = new Set([
+            'enableTranslation',
+            'enableHoverPreview',
+            'enablePopupHoverPreview',
+            'enableInfiniteScroll'
+        ]);
+
         document.getElementById('nh-settings-save').onclick = async () => {
             const patch = readSettingsForm();
             closeModal();
             // 没有改动时不刷新页面，保留无限滚动已加载的内容和滚动位置。
             if (!hasSettingsChanges(patch)) return;
+            const changedKeys = Object.keys(patch).filter(key => !isSettingValueEqual(Config.get(key), patch[key]));
+            const needsReload = changedKeys.some(key => RELOAD_REQUIRED_KEYS.has(key));
             const disablingMetaCache = Config.get('enableMetaPersistentCache') !== false
                 && patch.enableMetaPersistentCache === false;
             Config.setMany(patch);
-            // 关闭持久缓存时先清空已缓存的数据再刷新。
+            // 关闭持久缓存时先清空已缓存的数据。
             if (disablingMetaCache) await GalleryMetaStore.clear();
-            location.reload();
+            if (needsReload) {
+                location.reload();
+                return;
+            }
+
+            // 非结构性开关/参数热更新：保留当前页面、无限滚动已追加内容与滚动位置。
+            if (changedKeys.includes('showPageSettingsButton')) updatePageSettingsButton();
+            if (changedKeys.includes('showLangDropDown') || changedKeys.includes('langFilter')) {
+                document.getElementById('nh-lang-filter')?.remove();
+                setupLanguageFilterUI();
+                runLanguageFilter(document, Config.get('langFilter'));
+            }
+            if (changedKeys.includes('enableFullBlacklistHide')) {
+                SiteBlacklist.apply(document);
+            }
+            if (changedKeys.includes('translationMode')) {
+                states.forEach(state => { state.tagsHtml = ''; });
+                resetTagTranslationState(document);
+                runContentTranslation(document);
+            }
+            if (changedKeys.includes('uploadTimeDisplayMode')) {
+                queryAll(document, 'time').forEach(t => {
+                    delete t.dataset.nhTranslatedTime;
+                    delete t.dataset.nhTranslatedAt;
+                });
+                runUITranslation(document);
+            }
+            if (changedKeys.includes('showPageNumbers')) {
+                if (!Config.get('showPageNumbers')) {
+                    queryAll(document, '.nh-page-number').forEach(el => el.remove());
+                    queryAll(document, GALLERY_SELECTORS.coverLink).forEach(cover => { delete cover.dataset.pageProcessed; });
+                } else {
+                    GalleryMeta.refresh(document);
+                }
+            }
+            if (changedKeys.includes('enableSuggestions') || changedKeys.includes('searchSuggestionMode')) {
+                clearSearchSuggestionBox();
+            }
+            if (changedKeys.includes('enableQuickTags') || changedKeys.includes('quickTagsSettings')) {
+                document.getElementById('nh-helper-quick-tags')?.remove();
+                setupSearchUI();
+            }
+            if (changedKeys.includes('popupHoverPreviewImageScalePercent') || changedKeys.includes('popupHoverPreviewPosition')) {
+                syncPreviewPopupSettings();
+            }
+            if (changedKeys.some(k => k.startsWith('readingMode') || k === 'enableReadingMode')) {
+                ReadingMode.refresh();
+                applyReadingProgressBadges(getGalleryNodes(document));
+            }
+            if (changedKeys.includes('enableDetailQuickBlacklist')) {
+                void refreshDetailQuickBlacklistButtons(document);
+            }
+            if (changedKeys.includes('enableUserSettingsBlacklistFilter')) {
+                UserSettingsBlacklistFilter.apply(document);
+            }
+            if (changedKeys.includes('showDevPanel')) {
+                Diagnostics.sync();
+            }
         };
     }
 
@@ -5100,6 +5319,19 @@
 
     const SEARCH_SUGGESTION_ITEM_ID_PREFIX = 'nh-helper-suggestion-';
 
+    function normalizeSearchNamespace(rawNs = '') {
+        const map = {
+            tag: 'tag', tags: 'tag',
+            category: 'tag', categories: 'tag',
+            artist: 'artist', artists: 'artist',
+            group: 'group', groups: 'group',
+            parody: 'parody', parodies: 'parody',
+            character: 'character', characters: 'character',
+            language: 'language', languages: 'language'
+        };
+        return map[String(rawNs || '').trim().toLowerCase()] || '';
+    }
+
     function clearSearchSuggestionBox() {
         document.querySelectorAll('.nh-helper-suggestion-box').forEach(box => box.remove());
         // 只清理本脚本设置的 aria-activedescendant，不动官方联想自己的属性。
@@ -5282,12 +5514,15 @@
                 const clean = token.replace(/^"|"$/g, '');
                 const isExcluded = token.startsWith('-');
                 const lookupTerm = isExcluded ? clean.substring(1) : clean;
-                const lookupKey = lookupTerm.toLowerCase();
-                let item = DB.cnToItem[lookupKey];
-                if (!item && lookupTerm.includes(':')) {
-                    const parts = lookupTerm.split(':');
-                    const namespacedKey = parts.length > 1 ? parts[1].replace(/"/g, '').toLowerCase() : '';
-                    if (namespacedKey && DB.cnToItem[namespacedKey]) item = DB.cnToItem[namespacedKey];
+                const nsMatch = lookupTerm.match(/^([a-zA-Z0-9_]+):(.*)$/);
+                let item = null;
+                let userNs = '';
+                if (nsMatch) {
+                    userNs = normalizeSearchNamespace(nsMatch[1]);
+                    const namespacedKey = nsMatch[2].replace(/^"|"$/g, '').trim().toLowerCase();
+                    if (namespacedKey) item = DB.lookupCnItem(namespacedKey, userNs);
+                } else {
+                    item = DB.lookupCnItem(lookupTerm);
                 }
                 if (item) {
                     const pluralNs = NS_PLURAL_MAP[item.namespace] || item.namespace;
@@ -5359,8 +5594,13 @@
             const raw = input.value;
             const caret = getInputCaret();
             const head = raw.slice(0, caret);
-            const tail = raw.slice(caret).replace(/^\s+/, '');
+            let tail = raw.slice(caret);
             const matchStr = suggestionItem.originalMatch;
+            const hasOpenQuote = ((String(matchStr || '').match(/"/g) || []).length % 2) === 1;
+            if (hasOpenQuote && tail.startsWith('"')) {
+                tail = tail.slice(1);
+            }
+            tail = tail.replace(/^\s+/, '');
             const lastIndex = head.lastIndexOf(matchStr);
             let finalValue = suggestionItem.finalValue;
             if (event && event.shiftKey && !finalValue.startsWith('-')) finalValue = '-' + finalValue;
@@ -5391,7 +5631,7 @@
             if (!Config.get('enableSuggestions') || getSearchSuggestionMode() === 'off') {
                 clearSearchSuggestionBox();
                 lastSuggestions = [];
-                if (qtContainer) qtContainer.style.display = 'flex';
+                if (searchUiActiveQuickTags) searchUiActiveQuickTags.style.display = 'flex';
                 return;
             }
             // 搜索索引懒加载：第一次聚焦搜索框时才启动 Worker 建索引。
@@ -5414,7 +5654,7 @@
                     }, 500);
                 }
             } else handleInput();
-            if (qtContainer) qtContainer.style.display = 'flex';
+            if (searchUiActiveQuickTags) searchUiActiveQuickTags.style.display = 'flex';
         });
         input.addEventListener('blur', () => {
             if (document.activeElement !== input) {
@@ -5427,7 +5667,7 @@
             const box = document.querySelector('.nh-helper-suggestion-box');
             if (e.key === 'Escape') {
                 if (box) clearSearchSuggestionBox();
-                if (qtContainer) qtContainer.style.display = 'none';
+                if (searchUiActiveQuickTags) searchUiActiveQuickTags.style.display = 'none';
                 return;
             }
             if (!box) return;
@@ -5474,6 +5714,20 @@
         });
     }
 
+    function replaceDirectTextNodes(el, mapper) {
+        if (!el) return false;
+        let changed = false;
+        el.childNodes.forEach(node => {
+            if (node.nodeType !== Node.TEXT_NODE) return;
+            const next = mapper(node.nodeValue);
+            if (typeof next === 'string' && next !== node.nodeValue) {
+                node.nodeValue = next;
+                changed = true;
+            }
+        });
+        return changed;
+    }
+
     function translateTextNode(rootNode) {
         const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, null, false);
         let node;
@@ -5483,10 +5737,11 @@
                 if (!text) continue;
                 const translated = getUITranslation(text, node.parentElement);
                 if (translated) {
-                    node.nodeValue = translated;
+                    node.nodeValue = node.nodeValue.replace(text, translated);
                     continue;
                 }
-                if (text.match(/^\d+ results?$/)) { node.nodeValue = text.replace('results', '个结果').replace('result', '个结果'); continue; }
+                const resultMatch = text.match(/^([\d,]+)\s+results?$/i);
+                if (resultMatch) { node.nodeValue = `${resultMatch[1]} 个结果`; continue; }
 
             } else if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA') {
                 const ph = node.getAttribute('placeholder');
@@ -5845,16 +6100,18 @@
         UserSettingsBlacklistFilter.init(settingsRoot);
     }
 
+    const ZH_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
+
     function formatAbsoluteDateTime(date) {
-        return date.toLocaleString('zh-cn', {
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        });
+        return ZH_DATE_TIME_FORMATTER.format(date);
     }
 
     function formatRelativeDateTime(date) {
@@ -5904,9 +6161,18 @@
             restoreIndexPageState(context, indexNamespace);
         }
 
-        queryAll(context, "li.desktop > a, ul.dropdown-menu > li > a, .menu-sign-in a, .menu.right a").forEach(item => {
+        queryAll(context, "li.desktop > a, ul.dropdown-menu > li > a, .menu-sign-in a, .menu-register a, .menu.right a, .community-btn, .community-panel a").forEach(item => {
+            if (item.firstElementChild) {
+                replaceDirectTextNodes(item, raw => {
+                    const txt = raw.trim();
+                    if (!txt) return raw;
+                    const translated = mapMenu[txt] || uiTranslations[txt];
+                    return translated ? raw.replace(txt, translated) : raw;
+                });
+                return;
+            }
             const txt = item.textContent.trim();
-            if (mapMenu[txt]) item.innerHTML = item.innerHTML.replace(txt, mapMenu[txt]);
+            if (mapMenu[txt]) item.textContent = mapMenu[txt];
             else if (uiTranslations[txt]) item.textContent = uiTranslations[txt];
         });
 
@@ -5929,23 +6195,45 @@
             }
         });
 
+        const timeMode = Config.get('uploadTimeDisplayMode') || 'combined';
+        const nowTs = Date.now();
         queryAll(context, 'time').forEach(t => {
-            if (t.dateTime) {
-                try {
-                    const d = new Date(t.dateTime);
+            if (!t.dateTime) return;
+            const lastAt = Number(t.dataset.nhTranslatedAt || 0);
+            if (t.dataset.nhTranslatedTime === timeMode && (nowTs - lastAt) < 60000) return;
+            try {
+                const d = new Date(t.dateTime);
+                if (Number.isNaN(d.getTime())) return;
+                if (timeMode === 'combined') {
+                    t.innerHTML = `${escapeHtml(formatRelativeDateTime(d))} <span style="opacity: 0.6">(${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()})</span>`;
+                } else {
                     t.textContent = formatConfiguredTimeDisplay(d);
-                    t.dataset.nhTranslatedTime = '1';
-                } catch (e) {}
+                }
+                t.dataset.nhTranslatedTime = timeMode;
+                t.dataset.nhTranslatedAt = String(nowTs);
+            } catch (e) {}
+        });
+
+        queryAll(context, 'h2, .section > h3, #content > h1, .header-row > h1').forEach(header => {
+            replaceDirectTextNodes(header, raw => {
+                const txt = raw.trim();
+                if (!txt) return raw;
+                if (/([\d,]+)\s+results?/i.test(txt)) {
+                    return raw.replace(/([\d,]+)\s+results?/i, '$1 个结果');
+                }
+                return uiTranslations[txt] ? raw.replace(txt, uiTranslations[txt]) : raw;
+            });
+        });
+
+        queryAll(context, '.save-btn, dialog.save-dialog, form[action="/search/"] .ac-search-text, form[action="/search/"] .ac-op-desc').forEach(el => {
+            if (el.matches('dialog')) translateTextNode(el);
+            else {
+                const txt = el.textContent.trim();
+                if (uiTranslations[txt]) el.textContent = uiTranslations[txt];
             }
         });
 
-        queryAll(context, 'h2, .section > h3, #content > h1').forEach(header => {
-            let txt = header.textContent.trim();
-            if (txt.includes('results')) header.innerHTML = header.innerHTML.replace(/\d+ results?/, match => ` ${match.split(' ')[0]} 个结果`);
-            else if (uiTranslations[txt]) header.textContent = uiTranslations[txt];
-        });
-
-        queryAll(context, '.advertisement').forEach(ad => ad.remove());
+        queryAll(context, '.ad-wrapper, .advertisement').forEach(ad => ad.classList.add(GALLERY_STATE_CLASSES.hidden));
 
         if (
             window.location.pathname === '/login'
@@ -6068,12 +6356,36 @@
         }
 
         if (loc.includes('/g/')) {
-            const favSpan = queryOne(context, '#favorite .text');
-            if (favSpan && (favSpan.textContent === 'Favorite' || favSpan.textContent === 'Unfavorite')) {
-                favSpan.textContent = uiTranslations[favSpan.textContent];
+            const favSpan = queryOne(context, '#favorite .text')
+                || queryOne(context, '#bigcontainer .buttons button .fa-heart')?.parentElement?.querySelector('span:not(.top):not(.nobold)');
+            if (favSpan) {
+                replaceDirectTextNodes(favSpan, raw => {
+                    const txt = raw.trim();
+                    if (txt === 'Favorite' || txt === 'Unfavorite') {
+                        return raw.replace(txt, uiTranslations[txt]);
+                    }
+                    return raw;
+                });
             }
             const downloadBtn = queryOne(context, '#download');
-            if (downloadBtn && downloadBtn.textContent.includes('Download')) downloadBtn.innerHTML = '<i class="fa fa-download"></i> 下载 (种子)';
+            if (downloadBtn) {
+                replaceDirectTextNodes(downloadBtn, raw => {
+                    const txt = raw.trim();
+                    if (txt === 'Download') return raw.replace('Download', '下载 (种子)');
+                    return raw;
+                });
+            }
+            queryAll(context, '#bigcontainer .buttons .top').forEach(tip => {
+                replaceDirectTextNodes(tip, raw => {
+                    const txt = raw.trim();
+                    return uiTranslations[txt] ? raw.replace(txt, uiTranslations[txt]) : raw;
+                });
+            });
+            queryAll(context, '.ts-cta-text strong, .ts-cta-sub').forEach(el => {
+                const txt = el.textContent.trim();
+                if (uiTranslations[txt]) el.textContent = uiTranslations[txt];
+            });
+            queryAll(context, 'dialog.ext-dialog').forEach(dialog => translateTextNode(dialog));
 
             queryAll(context, '#show-all-images-button .text').forEach(el => el.textContent = '显示全部');
             queryAll(context, '#show-more-images-button .text').forEach(el => el.textContent = '显示更多');
@@ -6082,13 +6394,29 @@
 
             const commentHeader = queryOne(context, '#comment-post-container h3');
             if (commentHeader && /Post a comment|New Comment/i.test(commentHeader.textContent)) {
-                commentHeader.innerHTML = '<i class="fa fa-pencil"></i> 发布评论';
+                replaceDirectTextNodes(commentHeader, raw => {
+                    return /Post a comment|New Comment/i.test(raw) ? ' 发布评论' : raw;
+                });
             }
             const postBtn = queryOne(context, '#comment_form .btn');
             if (postBtn && /Comment|Post/i.test(postBtn.textContent)) postBtn.textContent = '评论';
             const commentInput = queryOne(context, '#comment_form textarea');
             if (commentInput && commentInput.getAttribute('placeholder') === 'If you ask for translations, you will die.') {
                 commentInput.setAttribute('placeholder', '如果你敢在评论里求翻译，你就死定了。');
+            }
+            const commentLoginPrompt = queryOne(context, '#comment-post-container .row p');
+            if (commentLoginPrompt && /to post a comment\./i.test(commentLoginPrompt.textContent)) {
+                const links = queryAll(commentLoginPrompt, 'a');
+                links.forEach(a => {
+                    const t = a.textContent.trim();
+                    if (t === 'Login') a.textContent = '登录';
+                    else if (t === 'register') a.textContent = '注册';
+                });
+                replaceDirectTextNodes(commentLoginPrompt, raw => {
+                    if (raw.trim() === 'or') return ' 或 ';
+                    if (raw.includes('to post a comment')) return ' 后才能发表评论。';
+                    return raw;
+                });
             }
             queryAll(context, '#comments, #comments-container, .comment-container, .comments').forEach(container => {
                 queryAll(container, 'p, .empty, .empty-comments, .placeholder').forEach(el => {
@@ -6104,8 +6432,16 @@
             translateInfoPage();
         }
 
-        queryAll(context, '.fa-fire').forEach(i => { if(i.parentNode.textContent.includes('Popular')) i.parentNode.innerHTML = '<i class="fa fa-fire"></i> 当前热门'; });
-        queryAll(context, '.fa-box-tissue').forEach(i => { if(i.parentNode.textContent.includes('New Uploads')) i.parentNode.innerHTML = '<i class="fa fa-box-tissue"></i> 最新上传'; });
+        queryAll(context, '.fa-fire').forEach(i => {
+            if (i.parentNode?.textContent?.includes('Popular')) {
+                replaceDirectTextNodes(i.parentNode, raw => /Popular/i.test(raw) ? ' 当前热门' : raw);
+            }
+        });
+        queryAll(context, '.fa-box-tissue').forEach(i => {
+            if (i.parentNode?.textContent?.includes('New Uploads')) {
+                replaceDirectTextNodes(i.parentNode, raw => /New Uploads/i.test(raw) ? ' 最新上传' : raw);
+            }
+        });
 
         queryAll(context, '.sort-type, .sort-type a, .sort-type span').forEach(el => translateTextNode(el));
 
@@ -6290,7 +6626,9 @@
         }
 
         const processContainer = (container) => {
-            const ns = detectTagNamespaceFromText(container.textContent);
+            const headerText = typeof getTagContainerHeader === 'function' ? getTagContainerHeader(container) : '';
+            const mappedNs = mapTagHeaders[headerText];
+            const ns = (mappedNs && mappedNs !== 'pages') ? mappedNs : detectTagNamespaceFromText(headerText || container.textContent);
             container.querySelectorAll(`.tags ${TAG_NAME_SELECTOR}`).forEach(el => translateTagElement(el, ns));
         };
         if (context.classList && context.classList.contains('tag-container')) processContainer(context);
@@ -6536,6 +6874,10 @@
                 }
 
                 if (!this.hasSyncedOnce && this.syncAttempts < this.maxSyncAttempts) {
+                    if (!this.getApp() && NhentaiUserscriptBridge.getData()) {
+                        this.hasSyncedOnce = true;
+                        return;
+                    }
                     this.scheduleSync(Math.min(1800, delay + 200));
                 }
             }, delay);
@@ -6673,8 +7015,8 @@
         }
         if (resetGalleryState) {
             resetGalleryEnhancementState(document);
+            resetTagTranslationState(document);
         }
-        resetTagTranslationState(document);
         refreshNavbarUI();
         runUITranslation(document);
         refreshGalleryEnhancements(document, { translate: true });
@@ -6834,6 +7176,7 @@
         consecutiveEmptyPages: 0,
         pausedForEmptyPages: false,
         offscreenObserver: null,
+        tagIdBySlugCache: new Map(),
 
         isListPage() {
             if (!Config.get('enableInfiniteScroll')) return false;
@@ -6904,7 +7247,10 @@
         },
 
         syncNextUrlFromDom(root = this.getContentRoot(), { preserveWhenMissing = false, source = 'dom' } = {}) {
-            const nextUrl = this.getNextUrl(root) || this.deriveUserscriptNextUrl() || this.deriveImplicitNextUrl();
+            const domNextUrl = this.getNextUrl(root);
+            const hasApiAppendedPages = this.hasAppendedPageNodes(root) && Boolean(this.lastLoadedPageUrl);
+            const nextUrl = domNextUrl
+                || (hasApiAppendedPages ? '' : (this.deriveUserscriptNextUrl() || this.deriveImplicitNextUrl()));
             recordInfiniteScrollDebug('lastNextUrlSyncSource', `${source}:${nextUrl ? 'hit' : 'miss'}${!nextUrl && preserveWhenMissing ? ':preserved' : ''}`);
             if (nextUrl || !preserveWhenMissing) {
                 this.nextUrl = nextUrl;
@@ -6914,6 +7260,11 @@
 
         syncNextUrlFromUserscriptPagination(pagination = null) {
             if (!this.isListPage()) return;
+            if (this.hasAppendedPageNodes() && this.lastLoadedPageUrl) {
+                const loadedPage = this.getPageNumberFromUrl(this.lastLoadedPageUrl);
+                const bridgePage = Number(pagination?.page || 0);
+                if (loadedPage > bridgePage) return;
+            }
             const nextUrl = this.deriveUserscriptNextUrl(pagination);
             if (!nextUrl && this.hasNextPage()) return;
             this.nextUrl = nextUrl;
@@ -7327,7 +7678,123 @@
             };
         },
 
-        appendLoadedPage(contentRoot, container, pagination, pageNumber) {
+        async resolveApiTagId(namespace, slug) {
+            const key = `${namespace}:${slug}`;
+            if (this.tagIdBySlugCache.has(key)) return this.tagIdBySlugCache.get(key);
+            const currentTag = NhentaiUserscriptBridge.getCurrentTag();
+            if (
+                currentTag
+                && String(currentTag.type || '') === String(namespace)
+                && String(currentTag.slug || '') === String(slug)
+                && Number(currentTag.id) > 0
+            ) {
+                const tagId = Number(currentTag.id);
+                this.tagIdBySlugCache.set(key, tagId);
+                return tagId;
+            }
+            const payload = await requestNhentaiApiJson(`/api/v2/tags/${encodeURIComponent(namespace)}/${encodeURIComponent(slug)}`, {
+                method: 'GET'
+            });
+            const tagId = Number(payload?.id || payload?.result?.id || payload?.data?.id || 0);
+            if (tagId > 0) {
+                this.tagIdBySlugCache.set(key, tagId);
+                return tagId;
+            }
+            return 0;
+        },
+
+        buildGalleryListContainerFromEntries(entries, pathname = location.pathname) {
+            const isSearchGrid = /^\/search\/?$/.test(pathname) || Boolean(queryOne(this.getContentRoot(), '.gallery-grid'));
+            const container = document.createElement('div');
+            container.className = isSearchGrid ? 'gallery-grid' : 'container index-container';
+
+            entries.forEach(entry => {
+                const id = String(entry?.id || '');
+                if (!id) return;
+                const tagIds = Array.isArray(entry.tag_ids)
+                    ? entry.tag_ids.map(tid => Number(tid)).filter(tid => Number.isFinite(tid) && tid > 0)
+                    : [];
+
+                const gallery = document.createElement('div');
+                gallery.className = 'gallery';
+                if (tagIds.includes(Number(LANG_IDS.CHINESE))) gallery.classList.add('lang-cn');
+                if (tagIds.includes(Number(LANG_IDS.ENGLISH))) gallery.classList.add('lang-gb');
+                if (tagIds.includes(Number(LANG_IDS.JAPANESE))) gallery.classList.add('lang-jp');
+                if (tagIds.length) gallery.dataset.nhTagIds = tagIds.join(' ');
+                if (entry.blacklisted === true) gallery.dataset.nhBlacklisted = 'true';
+
+                const cover = document.createElement('a');
+                cover.className = 'cover';
+                cover.href = `/g/${id}/`;
+                const tw = Number(entry.thumbnail_width) || 0;
+                const th = Number(entry.thumbnail_height) || 0;
+                const paddingRatio = (tw > 0 && th > 0) ? ((th / tw) * 100).toFixed(2).replace(/\.00$/, '') : '140';
+                cover.style.padding = `0 0 ${paddingRatio}%`;
+
+                const title = String(entry.english_title || entry.japanese_title || '');
+                const img = document.createElement('img');
+                img.loading = 'lazy';
+                img.className = 'lazyload';
+                img.alt = title;
+                const thumbPath = typeof entry.thumbnail === 'string' ? entry.thumbnail : (entry.thumbnail?.path || '');
+                const thumbSrc = buildThumbCandidateUrls(thumbPath)[0] || '';
+                if (thumbSrc) img.src = thumbSrc;
+
+                const caption = document.createElement('div');
+                caption.className = 'caption';
+                caption.textContent = title;
+
+                cover.appendChild(img);
+                cover.appendChild(caption);
+                gallery.appendChild(cover);
+                container.appendChild(gallery);
+            });
+
+            return container;
+        },
+
+        async fetchNextPageViaApi(requestUrl) {
+            const parsed = new URL(requestUrl, location.origin);
+            const pathname = parsed.pathname;
+            const page = this.getPageNumberFromUrl(requestUrl);
+            const sort = parsed.searchParams.get('sort') || 'date';
+            let endpoint = '';
+
+            if (pathname === '/') {
+                endpoint = `/api/v2/galleries?page=${page}`;
+            } else if (/^\/search\/?$/.test(pathname)) {
+                const query = parsed.searchParams.get('q') || '';
+                endpoint = `/api/v2/search?query=${encodeURIComponent(query)}&sort=${encodeURIComponent(sort)}&page=${page}`;
+            } else {
+                const nsMatch = pathname.match(/^\/(tag|artist|group|parody|character|language|category)\/([^/]+)\/?$/);
+                if (!nsMatch) return null;
+                const tagId = await this.resolveApiTagId(nsMatch[1], decodeURIComponent(nsMatch[2]));
+                if (!tagId) return null;
+                endpoint = `/api/v2/galleries/tagged?tag_id=${tagId}&sort=${encodeURIComponent(sort)}&page=${page}`;
+            }
+
+            const payload = await requestNhentaiApiJson(endpoint, { method: 'GET' });
+            const entries = Array.isArray(payload?.result)
+                ? payload.result
+                : (Array.isArray(payload?.galleries) ? payload.galleries : []);
+            if (!entries.length) return null;
+
+            rememberGalleryListEntries(entries);
+            const container = this.buildGalleryListContainerFromEntries(entries, pathname);
+            const numPages = Number(payload?.num_pages || 0);
+            const nextPageUrl = (Number.isFinite(numPages) && numPages > page)
+                ? NhentaiUserscriptBridge.buildPageUrl(page + 1, requestUrl)
+                : '';
+
+            return {
+                container,
+                pagination: null,
+                nextPageUrl,
+                entries
+            };
+        },
+
+        appendLoadedPage(contentRoot, container, pagination, pageNumber, entries = null) {
             this.removeExistingPagination(contentRoot);
             const shouldWrapSearchGrid = container.matches?.('.gallery-grid');
             const pageMarker = this.markInfiniteAppended(this.createPageMarker(pageNumber));
@@ -7350,7 +7817,10 @@
                 }
             }
             this.ensureSentinel(contentRoot);
-            refreshGalleryEnhancements(container, { translate: true });
+            refreshGalleryEnhancements(container, {
+                translate: true,
+                metaData: entries ? { galleries: entries } : undefined
+            });
             this.observeOffscreenPage(container);
             this.trackEmptyPage(container);
         },
@@ -7546,15 +8016,36 @@
             this.setStatus('loading');
 
             try {
-                const res = await fetch(requestUrl, { credentials: 'same-origin' });
-                if (!this.isRequestTokenActive(requestToken)) return;
-                if (!res.ok) {
-                    throw new Error(res.statusText || `HTTP ${res.status}`);
+                // 优先走 /api/v2/* 列表 JSON：规避 Cloudflare 对 fetch(HTML) 的 403 拦截，且自带页数与标签元数据。
+                let apiResult = null;
+                try {
+                    apiResult = await this.fetchNextPageViaApi(requestUrl);
+                } catch (apiError) {
+                    apiResult = null;
                 }
-
-                const htmlText = await res.text();
                 if (!this.isRequestTokenActive(requestToken)) return;
-                const { container, pagination } = this.parseNextPageDocument(htmlText);
+
+                let container = null;
+                let pagination = null;
+                let entries = null;
+
+                if (apiResult?.container) {
+                    container = apiResult.container;
+                    pagination = null;
+                    entries = apiResult.entries;
+                } else {
+                    const res = await fetch(requestUrl, { credentials: 'same-origin' });
+                    if (!this.isRequestTokenActive(requestToken)) return;
+                    if (!res.ok) {
+                        throw new Error(res.statusText || `HTTP ${res.status}`);
+                    }
+
+                    const htmlText = await res.text();
+                    if (!this.isRequestTokenActive(requestToken)) return;
+                    const parsedDoc = this.parseNextPageDocument(htmlText);
+                    container = parsedDoc.container;
+                    pagination = parsedDoc.pagination;
+                }
 
                 if (!container) {
                     throw new Error('Infinite scroll container not found');
@@ -7570,12 +8061,18 @@
                 this.lastLoadedPageUrl = requestUrl;
                 this.resetPaginationRecovery();
                 this.resetRetryState();
-                this.nextUrl = pagination?.querySelector('a.next')?.href || '';
-                this.normalizeNewGalleryNodes(container);
+                if (apiResult) {
+                    this.nextUrl = apiResult.nextPageUrl || '';
+                } else {
+                    this.nextUrl = pagination?.querySelector('a.next')?.href || '';
+                    this.normalizeNewGalleryNodes(container);
+                }
 
-                this.appendLoadedPage(latestContentRoot, container, pagination, pageNumber);
+                this.appendLoadedPage(latestContentRoot, container, pagination, pageNumber, entries);
                 if (!this.isRequestTokenActive(requestToken)) return;
-                this.syncNextUrlFromDom(latestContentRoot, { preserveWhenMissing: true });
+                if (!apiResult) {
+                    this.syncNextUrlFromDom(latestContentRoot, { preserveWhenMissing: true });
+                }
                 this.syncRouteAfterAppend(requestUrl);
                 this.finishLoadWithObserver();
             } catch (error) {
@@ -7675,8 +8172,9 @@
         }
     };
 
-    // 完整画廊元数据缓存只由 GalleryMeta implementation 管理。
+    // 完整画廊元数据缓存与会话级列表/热门/相关部分元数据缓存只由 GalleryMeta implementation 管理。
     const cache = new LRUCache(500);
+    const partialCache = new LRUCache(1500);
 
     function isCompleteMeta(meta) {
         return Boolean(
@@ -7988,6 +8486,9 @@
         activeEntry: null,
         inFlightSignature: '',
         inFlightPromise: null,
+        popularInFlightPromise: null,
+        popularFetchedAt: 0,
+        popularCacheTtlMs: 60 * 1000,
         tagIdCache: new Map(),
         failedSignature: '',
         failedAt: 0,
@@ -8168,6 +8669,20 @@
             };
         },
 
+        storeInlineEntries(entries = []) {
+            if (!Array.isArray(entries) || !entries.length) return;
+            entries.forEach(entry => {
+                const id = String(entry?.id || entry?.galleryId || '');
+                if (!id) return;
+                const stored = this.normalizeStoredMeta(entry);
+                partialCache.set(id, stored.meta);
+                if (stored.complete) {
+                    cache.set(id, stored.meta);
+                }
+            });
+            rememberGalleryListEntries(entries);
+        },
+
         storeEntries(signature, entries) {
             const byId = new Map();
             entries.forEach(entry => {
@@ -8175,14 +8690,37 @@
                 if (!id) return;
                 const stored = this.normalizeStoredMeta(entry);
                 byId.set(id, stored);
+                partialCache.set(id, stored.meta);
                 if (stored.complete) {
                     cache.set(id, stored.meta);
                 }
             });
+            rememberGalleryListEntries(entries);
             const stored = { signature, fetchedAt: Date.now(), byId };
             this.activeSignature = signature;
             this.activeEntry = stored;
             return stored;
+        },
+
+        async ensurePopularEntries() {
+            if ((Date.now() - this.popularFetchedAt) < this.popularCacheTtlMs) {
+                return null;
+            }
+            if (this.popularInFlightPromise) {
+                return this.popularInFlightPromise;
+            }
+            this.popularInFlightPromise = this.fetchJson(API_ENDPOINTS.popularGalleries)
+                .then(payload => {
+                    const entries = this.unwrapList(payload);
+                    this.storeInlineEntries(entries);
+                    this.popularFetchedAt = Date.now();
+                    return entries;
+                })
+                .catch(() => null)
+                .finally(() => {
+                    this.popularInFlightPromise = null;
+                });
+            return this.popularInFlightPromise;
         },
 
         async ensureContextEntries(targetIds = []) {
@@ -8227,10 +8765,17 @@
         async resolve(id, { allowPartial = false } = {}) {
             const targetId = String(id || '');
             if (!targetId) return null;
+            const fullCached = cache.get(targetId);
+            if (fullCached) return fullCached;
             const userscriptMeta = this.getUserscriptMeta(targetId, { allowPartial });
             if (userscriptMeta) {
-                cache.set(targetId, userscriptMeta);
+                if (isCompleteMeta(userscriptMeta)) cache.set(targetId, userscriptMeta);
+                else partialCache.set(targetId, userscriptMeta);
                 return userscriptMeta;
+            }
+            if (allowPartial) {
+                const partialCached = partialCache.get(targetId);
+                if (partialCached) return partialCached;
             }
             const context = this.getContext();
             if (!context) return null;
@@ -8241,7 +8786,18 @@
             }
 
             const entry = await this.ensureContextEntries([targetId]);
-            return this.getStoredMeta(entry, targetId, allowPartial);
+            const resolved = this.getStoredMeta(entry, targetId, allowPartial);
+            if (resolved) return resolved;
+
+            if (allowPartial) {
+                const partialAfterEnsure = partialCache.get(targetId);
+                if (partialAfterEnsure) return partialAfterEnsure;
+                if (context.type === 'home') {
+                    await this.ensurePopularEntries();
+                    return partialCache.get(targetId) || null;
+                }
+            }
+            return null;
         },
 
         prewarm(galleryIds = []) {
@@ -8266,11 +8822,15 @@
 
         rememberUserscriptCurrentGallery(data = NhentaiUserscriptBridge.getData()) {
             const gallery = data?.gallery;
+            if (Array.isArray(gallery?.related) && gallery.related.length) {
+                this.storeInlineEntries(gallery.related);
+            }
             if (!gallery?.id) return null;
             const normalized = normalizeGalleryMeta(gallery);
             if (!isCompleteMeta(normalized)) return null;
             const id = String(gallery.id);
             cache.set(id, normalized);
+            partialCache.set(id, normalized);
             this.rememberResolvedMeta(id, normalized);
             return normalized;
         }
@@ -8873,6 +9433,9 @@
         },
 
         refresh(context = document, data = NhentaiUserscriptBridge.getData()) {
+            if (Array.isArray(data?.galleries) && data.galleries.length) {
+                PageMetaResolver.storeInlineEntries(data.galleries);
+            }
             const pageContext = PageMetaResolver.getContext();
             PageMetaResolver.seedFromUserscriptContext(pageContext, data);
             PageMetaResolver.rememberUserscriptCurrentGallery(data);
@@ -9034,6 +9597,9 @@
         totalPages: 0,
         isOpening: false,
         saveTimer: null,
+        scrollbarRaf: 0,
+        dragPrimeTimer: null,
+        lastDragApproximatePage: 1,
         scrollbarItems: new Map(),
 
         isEnabled() {
@@ -9447,10 +10013,18 @@
 
         handleReaderScroll() {
             this.lastReaderScrollAt = Date.now();
-            this.updateScrollbarThumb();
+            this.scheduleScrollbarThumbUpdate();
             // 自动滚动每帧都会触发 scroll，工具栏已在开始时收起，不必每帧再处理。
             if (this.autoScrolling) return;
             this.hideTools({ force: true });
+        },
+
+        scheduleScrollbarThumbUpdate() {
+            if (this.scrollbarRaf) return;
+            this.scrollbarRaf = requestAnimationFrame(() => {
+                this.scrollbarRaf = 0;
+                this.updateScrollbarThumb();
+            });
         },
 
         handleToolPanelActivity(event) {
@@ -9564,9 +10138,18 @@
             this.updateScrollbarThumb();
 
             const approximatePage = Math.max(1, Math.min(this.totalPages, Math.round(normalized * Math.max(0, this.totalPages - 1)) + 1));
+            this.lastDragApproximatePage = approximatePage;
             this.updateActiveScrollbarItem(approximatePage);
             this.updateScrollbarPopper(approximatePage);
-            this.primeNearbyImages(Math.max(0, approximatePage - 1));
+            if (this.isDraggingScrollbar) {
+                clearTimeout(this.dragPrimeTimer);
+                this.dragPrimeTimer = setTimeout(() => {
+                    this.dragPrimeTimer = null;
+                    if (this.isOpen()) this.primeNearbyImages(Math.max(0, approximatePage - 1));
+                }, 80);
+            } else {
+                this.primeNearbyImages(Math.max(0, approximatePage - 1));
+            }
         },
 
         beginScrollbarDrag(pointerId) {
@@ -9580,6 +10163,13 @@
             this.scrollbarPointerId = null;
             this.isDraggingScrollbar = false;
             this.scrollbarRoot?.classList.remove('is-dragging');
+            if (this.dragPrimeTimer) {
+                clearTimeout(this.dragPrimeTimer);
+                this.dragPrimeTimer = null;
+                if (this.isOpen()) {
+                    this.primeNearbyImages(Math.max(0, (this.lastDragApproximatePage || this.currentPage) - 1));
+                }
+            }
         },
 
         handleScrollbarPointerDown(event) {
@@ -9783,14 +10373,22 @@
             if ((isSpace && !event.shiftKey) || event.key === 'PageDown' || event.key === 'ArrowDown') {
                 event.preventDefault();
                 ReadingMode.hideTools({ force: true });
-                ReadingMode.scrollContainer.scrollBy({ top: step, behavior: 'smooth' });
+                if (ReadingMode.getFitMode() === 'height') {
+                    ReadingMode.scrollToPage(ReadingMode.currentPage + 1, 'smooth');
+                } else {
+                    ReadingMode.scrollContainer.scrollBy({ top: step, behavior: 'smooth' });
+                }
                 return;
             }
 
             if ((isSpace && event.shiftKey) || event.key === 'PageUp' || event.key === 'ArrowUp') {
                 event.preventDefault();
                 ReadingMode.hideTools({ force: true });
-                ReadingMode.scrollContainer.scrollBy({ top: -step, behavior: 'smooth' });
+                if (ReadingMode.getFitMode() === 'height') {
+                    ReadingMode.scrollToPage(ReadingMode.currentPage - 1, 'smooth');
+                } else {
+                    ReadingMode.scrollContainer.scrollBy({ top: -step, behavior: 'smooth' });
+                }
                 return;
             }
 
@@ -10059,6 +10657,14 @@
             Config.flush();
             this.clearSaveTimer();
             this.clearToolAutoHideTimer();
+            if (this.scrollbarRaf) {
+                cancelAnimationFrame(this.scrollbarRaf);
+                this.scrollbarRaf = 0;
+            }
+            if (this.dragPrimeTimer) {
+                clearTimeout(this.dragPrimeTimer);
+                this.dragPrimeTimer = null;
+            }
             this.stopAutoScroll();
             this.teardownObservers();
             this.unbindKeydown();
@@ -10363,10 +10969,9 @@
 
         tags.forEach(t => {
             const count = t.count || 0;
-            const enName = t.name;
-            let cnName = null;
-            if (DB.data[t.type] && DB.data[t.type][enName]) cnName = DB.data[t.type][enName];
-            else if (DB.data.tag && DB.data.tag[enName]) cnName = DB.data.tag[enName];
+            const enName = String(t.name || '');
+            const matched = lookupTagTranslation(enName, t.type, t.url || '');
+            const cnName = matched?.cnName || null;
 
             const safeEn = escapeHtml(enName);
             const safeCn = escapeHtml(cnName);
@@ -10565,7 +11170,8 @@
         const neededWidth = (img?.clientWidth || 0) * (window.devicePixelRatio || 1);
         if (!thumbPath || !thumbWidth || !neededWidth || neededWidth > thumbWidth * 1.15) return '';
         if (/^https?:\/\//.test(thumbPath)) return thumbPath;
-        return origin ? `${origin}/${thumbPath.replace(/^\/+/, '')}` : '';
+        const official = typeof buildThumbCandidateUrls === 'function' ? buildThumbCandidateUrls(thumbPath)[0] : '';
+        return official || (origin ? `${origin}/${thumbPath.replace(/^\/+/, '')}` : '');
     }
 
     function renderPreviewLoadingState(root, gallery = null) {
@@ -11674,7 +12280,6 @@
 
         async runAsyncPhase() {
             await initSearchAndTranslation();
-            scheduleRouteRefresh();
         },
 
         async start() {

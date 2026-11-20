@@ -1,3 +1,17 @@
+    function replaceDirectTextNodes(el, mapper) {
+        if (!el) return false;
+        let changed = false;
+        el.childNodes.forEach(node => {
+            if (node.nodeType !== Node.TEXT_NODE) return;
+            const next = mapper(node.nodeValue);
+            if (typeof next === 'string' && next !== node.nodeValue) {
+                node.nodeValue = next;
+                changed = true;
+            }
+        });
+        return changed;
+    }
+
     function translateTextNode(rootNode) {
         const walker = document.createTreeWalker(rootNode, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, null, false);
         let node;
@@ -7,10 +21,11 @@
                 if (!text) continue;
                 const translated = getUITranslation(text, node.parentElement);
                 if (translated) {
-                    node.nodeValue = translated;
+                    node.nodeValue = node.nodeValue.replace(text, translated);
                     continue;
                 }
-                if (text.match(/^\d+ results?$/)) { node.nodeValue = text.replace('results', '个结果').replace('result', '个结果'); continue; }
+                const resultMatch = text.match(/^([\d,]+)\s+results?$/i);
+                if (resultMatch) { node.nodeValue = `${resultMatch[1]} 个结果`; continue; }
 
             } else if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA') {
                 const ph = node.getAttribute('placeholder');
@@ -370,16 +385,18 @@
         UserSettingsBlacklistFilter.init(settingsRoot);
     }
 
+    const ZH_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
+
     function formatAbsoluteDateTime(date) {
-        return date.toLocaleString('zh-cn', {
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: false
-        });
+        return ZH_DATE_TIME_FORMATTER.format(date);
     }
 
     function formatRelativeDateTime(date) {
@@ -429,9 +446,18 @@
             restoreIndexPageState(context, indexNamespace);
         }
 
-        queryAll(context, "li.desktop > a, ul.dropdown-menu > li > a, .menu-sign-in a, .menu.right a").forEach(item => {
+        queryAll(context, "li.desktop > a, ul.dropdown-menu > li > a, .menu-sign-in a, .menu-register a, .menu.right a, .community-btn, .community-panel a").forEach(item => {
+            if (item.firstElementChild) {
+                replaceDirectTextNodes(item, raw => {
+                    const txt = raw.trim();
+                    if (!txt) return raw;
+                    const translated = mapMenu[txt] || uiTranslations[txt];
+                    return translated ? raw.replace(txt, translated) : raw;
+                });
+                return;
+            }
             const txt = item.textContent.trim();
-            if (mapMenu[txt]) item.innerHTML = item.innerHTML.replace(txt, mapMenu[txt]);
+            if (mapMenu[txt]) item.textContent = mapMenu[txt];
             else if (uiTranslations[txt]) item.textContent = uiTranslations[txt];
         });
 
@@ -454,23 +480,45 @@
             }
         });
 
+        const timeMode = Config.get('uploadTimeDisplayMode') || 'combined';
+        const nowTs = Date.now();
         queryAll(context, 'time').forEach(t => {
-            if (t.dateTime) {
-                try {
-                    const d = new Date(t.dateTime);
+            if (!t.dateTime) return;
+            const lastAt = Number(t.dataset.nhTranslatedAt || 0);
+            if (t.dataset.nhTranslatedTime === timeMode && (nowTs - lastAt) < 60000) return;
+            try {
+                const d = new Date(t.dateTime);
+                if (Number.isNaN(d.getTime())) return;
+                if (timeMode === 'combined') {
+                    t.innerHTML = `${escapeHtml(formatRelativeDateTime(d))} <span style="opacity: 0.6">(${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()})</span>`;
+                } else {
                     t.textContent = formatConfiguredTimeDisplay(d);
-                    t.dataset.nhTranslatedTime = '1';
-                } catch (e) {}
+                }
+                t.dataset.nhTranslatedTime = timeMode;
+                t.dataset.nhTranslatedAt = String(nowTs);
+            } catch (e) {}
+        });
+
+        queryAll(context, 'h2, .section > h3, #content > h1, .header-row > h1').forEach(header => {
+            replaceDirectTextNodes(header, raw => {
+                const txt = raw.trim();
+                if (!txt) return raw;
+                if (/([\d,]+)\s+results?/i.test(txt)) {
+                    return raw.replace(/([\d,]+)\s+results?/i, '$1 个结果');
+                }
+                return uiTranslations[txt] ? raw.replace(txt, uiTranslations[txt]) : raw;
+            });
+        });
+
+        queryAll(context, '.save-btn, dialog.save-dialog, form[action="/search/"] .ac-search-text, form[action="/search/"] .ac-op-desc').forEach(el => {
+            if (el.matches('dialog')) translateTextNode(el);
+            else {
+                const txt = el.textContent.trim();
+                if (uiTranslations[txt]) el.textContent = uiTranslations[txt];
             }
         });
 
-        queryAll(context, 'h2, .section > h3, #content > h1').forEach(header => {
-            let txt = header.textContent.trim();
-            if (txt.includes('results')) header.innerHTML = header.innerHTML.replace(/\d+ results?/, match => ` ${match.split(' ')[0]} 个结果`);
-            else if (uiTranslations[txt]) header.textContent = uiTranslations[txt];
-        });
-
-        queryAll(context, '.advertisement').forEach(ad => ad.remove());
+        queryAll(context, '.ad-wrapper, .advertisement').forEach(ad => ad.classList.add(GALLERY_STATE_CLASSES.hidden));
 
         if (
             window.location.pathname === '/login'
@@ -593,12 +641,36 @@
         }
 
         if (loc.includes('/g/')) {
-            const favSpan = queryOne(context, '#favorite .text');
-            if (favSpan && (favSpan.textContent === 'Favorite' || favSpan.textContent === 'Unfavorite')) {
-                favSpan.textContent = uiTranslations[favSpan.textContent];
+            const favSpan = queryOne(context, '#favorite .text')
+                || queryOne(context, '#bigcontainer .buttons button .fa-heart')?.parentElement?.querySelector('span:not(.top):not(.nobold)');
+            if (favSpan) {
+                replaceDirectTextNodes(favSpan, raw => {
+                    const txt = raw.trim();
+                    if (txt === 'Favorite' || txt === 'Unfavorite') {
+                        return raw.replace(txt, uiTranslations[txt]);
+                    }
+                    return raw;
+                });
             }
             const downloadBtn = queryOne(context, '#download');
-            if (downloadBtn && downloadBtn.textContent.includes('Download')) downloadBtn.innerHTML = '<i class="fa fa-download"></i> 下载 (种子)';
+            if (downloadBtn) {
+                replaceDirectTextNodes(downloadBtn, raw => {
+                    const txt = raw.trim();
+                    if (txt === 'Download') return raw.replace('Download', '下载 (种子)');
+                    return raw;
+                });
+            }
+            queryAll(context, '#bigcontainer .buttons .top').forEach(tip => {
+                replaceDirectTextNodes(tip, raw => {
+                    const txt = raw.trim();
+                    return uiTranslations[txt] ? raw.replace(txt, uiTranslations[txt]) : raw;
+                });
+            });
+            queryAll(context, '.ts-cta-text strong, .ts-cta-sub').forEach(el => {
+                const txt = el.textContent.trim();
+                if (uiTranslations[txt]) el.textContent = uiTranslations[txt];
+            });
+            queryAll(context, 'dialog.ext-dialog').forEach(dialog => translateTextNode(dialog));
 
             queryAll(context, '#show-all-images-button .text').forEach(el => el.textContent = '显示全部');
             queryAll(context, '#show-more-images-button .text').forEach(el => el.textContent = '显示更多');
@@ -607,13 +679,29 @@
 
             const commentHeader = queryOne(context, '#comment-post-container h3');
             if (commentHeader && /Post a comment|New Comment/i.test(commentHeader.textContent)) {
-                commentHeader.innerHTML = '<i class="fa fa-pencil"></i> 发布评论';
+                replaceDirectTextNodes(commentHeader, raw => {
+                    return /Post a comment|New Comment/i.test(raw) ? ' 发布评论' : raw;
+                });
             }
             const postBtn = queryOne(context, '#comment_form .btn');
             if (postBtn && /Comment|Post/i.test(postBtn.textContent)) postBtn.textContent = '评论';
             const commentInput = queryOne(context, '#comment_form textarea');
             if (commentInput && commentInput.getAttribute('placeholder') === 'If you ask for translations, you will die.') {
                 commentInput.setAttribute('placeholder', '如果你敢在评论里求翻译，你就死定了。');
+            }
+            const commentLoginPrompt = queryOne(context, '#comment-post-container .row p');
+            if (commentLoginPrompt && /to post a comment\./i.test(commentLoginPrompt.textContent)) {
+                const links = queryAll(commentLoginPrompt, 'a');
+                links.forEach(a => {
+                    const t = a.textContent.trim();
+                    if (t === 'Login') a.textContent = '登录';
+                    else if (t === 'register') a.textContent = '注册';
+                });
+                replaceDirectTextNodes(commentLoginPrompt, raw => {
+                    if (raw.trim() === 'or') return ' 或 ';
+                    if (raw.includes('to post a comment')) return ' 后才能发表评论。';
+                    return raw;
+                });
             }
             queryAll(context, '#comments, #comments-container, .comment-container, .comments').forEach(container => {
                 queryAll(container, 'p, .empty, .empty-comments, .placeholder').forEach(el => {
@@ -629,8 +717,16 @@
             translateInfoPage();
         }
 
-        queryAll(context, '.fa-fire').forEach(i => { if(i.parentNode.textContent.includes('Popular')) i.parentNode.innerHTML = '<i class="fa fa-fire"></i> 当前热门'; });
-        queryAll(context, '.fa-box-tissue').forEach(i => { if(i.parentNode.textContent.includes('New Uploads')) i.parentNode.innerHTML = '<i class="fa fa-box-tissue"></i> 最新上传'; });
+        queryAll(context, '.fa-fire').forEach(i => {
+            if (i.parentNode?.textContent?.includes('Popular')) {
+                replaceDirectTextNodes(i.parentNode, raw => /Popular/i.test(raw) ? ' 当前热门' : raw);
+            }
+        });
+        queryAll(context, '.fa-box-tissue').forEach(i => {
+            if (i.parentNode?.textContent?.includes('New Uploads')) {
+                replaceDirectTextNodes(i.parentNode, raw => /New Uploads/i.test(raw) ? ' 最新上传' : raw);
+            }
+        });
 
         queryAll(context, '.sort-type, .sort-type a, .sort-type span').forEach(el => translateTextNode(el));
 

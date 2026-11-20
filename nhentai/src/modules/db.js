@@ -49,6 +49,7 @@
     const DB = {
         data: {},
         cnToItem: {},
+        cnByNs: {},
         indexReady: false,
         worker: null,
         workerUrl: null,
@@ -418,18 +419,31 @@
         },
         rebuildCnIndex() {
             const map = {};
+            const byNs = {};
             Object.keys(this.data || {}).forEach(ns => {
                 const bucket = this.data[ns];
                 if (!bucket) return;
+                const nsMap = byNs[ns] || (byNs[ns] = {});
                 Object.keys(bucket).forEach(en => {
                     const cn = bucket[en];
                     if (!cn || cn === '-') return;
                     const key = String(cn).trim().toLowerCase();
-                    if (!key || map[key]) return;
-                    map[key] = { value: en, namespace: ns, cn };
+                    if (!key) return;
+                    const item = { value: en, namespace: ns, cn };
+                    if (!nsMap[key]) nsMap[key] = item;
+                    if (!map[key]) map[key] = item;
                 });
             });
             this.cnToItem = map;
+            this.cnByNs = byNs;
+        },
+        lookupCnItem(term, nsHint = '') {
+            const key = String(term || '').trim().toLowerCase();
+            if (!key) return null;
+            if (nsHint && this.cnByNs[nsHint]?.[key]) {
+                return this.cnByNs[nsHint][key];
+            }
+            return this.cnToItem[key] || null;
         },
         // 标签链接只有 slug（x-ray 与 big breasts 都写成 a-b），按 slug 反查词库原始英文名；按命名空间懒构建。
         findKeyBySlug(ns, slug) {
@@ -485,6 +499,15 @@
                 'parody': 'parodies',
                 'character': 'characters',
                 'language': 'languages'
+            };
+            const NS_ALIAS_MAP = {
+                'tag': 'tag', 'tags': 'tag',
+                'category': 'tag', 'categories': 'tag',
+                'artist': 'artist', 'artists': 'artist',
+                'group': 'group', 'groups': 'group',
+                'parody': 'parody', 'parodies': 'parody',
+                'character': 'character', 'characters': 'character',
+                'language': 'language', 'languages': 'language'
             };
 
             self.onmessage = function(e) {
@@ -610,48 +633,60 @@
                 if (inputStr.trim() === '' || (inputStr.endsWith(' ') && tokens.length > 0 && inputStr.slice(inputStr.lastIndexOf(tokens[tokens.length - 1])).trim() === tokens[tokens.length - 1] && tokens[tokens.length - 1].endsWith('"'))) {
                     return [];
                 }
-                const words = inputStr.trim().split(/\\s+/);
-                if (words.length === 0) return [];
 
                 const matches = [];
-                const maxLookBack = 4;
-
-                // Only look at the last "word" chunk for suggestion
-                for (let i = Math.min(words.length, maxLookBack); i >= 1; i--) {
-                    const slice = words.slice(-i).join(' ');
-                    let searchNs = null;
-                    let searchTerm = slice;
-                    let prefix = '';
-
-                    const nsMatch = slice.match(/^(-?)([a-zA-Z0-9_]+):(.*)/);
-                    if (nsMatch) {
-                        prefix = nsMatch[1] + nsMatch[2] + ':';
-                        searchNs = nsMatch[2];
-                        if (searchNs.endsWith('s')) searchNs = searchNs.slice(0, -1);
-                        searchTerm = nsMatch[3];
-                    }
-
-                    const cleanTerm = searchTerm.replace(/^"|"$/g, '').toLowerCase();
-                    if (cleanTerm.length < 1) continue;
-
-                    // SELECT THE RIGHT BUCKET
+                const collectForSlice = (slice, searchNs, cleanTerm, lookBackSize, prefix) => {
+                    if (!cleanTerm || cleanTerm.length < 1) return;
                     let targetIndex = index.all;
                     let targetSortedIndex = sortedIndex.all;
                     if (searchNs && index[searchNs]) {
                         targetIndex = index[searchNs];
                         targetSortedIndex = sortedIndex[searchNs] || index[searchNs];
                     } else if (searchNs) {
-                        // Namespace exists but not in our DB (e.g. pages:), skip search or return empty
-                        continue;
+                        return;
                     }
 
-                    const tempResults = collectPrefixMatches(targetSortedIndex, cleanTerm, i, slice, prefix, 24);
+                    const tempResults = collectPrefixMatches(targetSortedIndex, cleanTerm, lookBackSize, slice, prefix, 24);
                     if (tempResults.length < 12) {
-                        const containsResults = collectContainsMatches(targetIndex, cleanTerm, i, slice, prefix, 12 - tempResults.length);
+                        const containsResults = collectContainsMatches(targetIndex, cleanTerm, lookBackSize, slice, prefix, 12 - tempResults.length);
                         tempResults.push(...containsResults);
                     }
                     tempResults.sort((a, b) => b.score - a.score);
                     matches.push(...tempResults.slice(0, 20));
+                };
+
+                // 处理未闭合引号（例如点击快捷标签产生的 tags:" 或 parodies:"big b），避免按空格拆分丢失命名空间约束。
+                const openQuoteMatch = inputStr.match(/(?:^|\\s)((-?)([a-zA-Z0-9_]+):)?"([^"]*)$/);
+                if (openQuoteMatch) {
+                    const slice = openQuoteMatch[0].replace(/^\\s+/, '');
+                    const prefix = openQuoteMatch[1] || '';
+                    const rawNs = (openQuoteMatch[3] || '').toLowerCase();
+                    const searchNs = rawNs ? (NS_ALIAS_MAP[rawNs] || rawNs) : null;
+                    const cleanTerm = openQuoteMatch[4].trim().toLowerCase();
+                    collectForSlice(slice, searchNs, cleanTerm, 2, prefix);
+                } else {
+                    const words = inputStr.trim().split(/\\s+/);
+                    if (words.length === 0) return [];
+                    const maxLookBack = 4;
+
+                    // Only look at the last "word" chunk for suggestion
+                    for (let i = Math.min(words.length, maxLookBack); i >= 1; i--) {
+                        const slice = words.slice(-i).join(' ');
+                        let searchNs = null;
+                        let searchTerm = slice;
+                        let prefix = '';
+
+                        const nsMatch = slice.match(/^(-?)([a-zA-Z0-9_]+):(.*)/);
+                        if (nsMatch) {
+                            prefix = nsMatch[1] + nsMatch[2] + ':';
+                            const rawNs = nsMatch[2].toLowerCase();
+                            searchNs = NS_ALIAS_MAP[rawNs] || rawNs;
+                            searchTerm = nsMatch[3];
+                        }
+
+                        const cleanTerm = searchTerm.replace(/^"|"$/g, '').toLowerCase();
+                        collectForSlice(slice, searchNs, cleanTerm, i, prefix);
+                    }
                 }
 
                 const uniqueMap = new Map();
@@ -660,7 +695,8 @@
                     const uniqueKey = m.item.namespace + ':' + m.item.value;
                     if (!uniqueMap.has(uniqueKey)) {
                         const pluralNs = NS_PLURAL_MAP[m.item.namespace] || m.item.namespace;
-                        const finalVal = \`\${pluralNs}:"\${m.item.value}"\`;
+                        const excludePrefix = m.nsPrefix && m.nsPrefix.startsWith('-') ? '-' : '';
+                        const finalVal = \`\${excludePrefix}\${pluralNs}:"\${m.item.value}"\`;
                         uniqueMap.set(uniqueKey, {
                             item: m.item,
                             finalValue: finalVal,

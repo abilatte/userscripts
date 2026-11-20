@@ -12,6 +12,9 @@
         },
 
         refresh(context = document, data = NhentaiUserscriptBridge.getData()) {
+            if (Array.isArray(data?.galleries) && data.galleries.length) {
+                PageMetaResolver.storeInlineEntries(data.galleries);
+            }
             const pageContext = PageMetaResolver.getContext();
             PageMetaResolver.seedFromUserscriptContext(pageContext, data);
             PageMetaResolver.rememberUserscriptCurrentGallery(data);

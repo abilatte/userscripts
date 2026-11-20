@@ -30,8 +30,9 @@
         }
     };
 
-    // 完整画廊元数据缓存只由 GalleryMeta implementation 管理。
+    // 完整画廊元数据缓存与会话级列表/热门/相关部分元数据缓存只由 GalleryMeta implementation 管理。
     const cache = new LRUCache(500);
+    const partialCache = new LRUCache(1500);
 
     function isCompleteMeta(meta) {
         return Boolean(

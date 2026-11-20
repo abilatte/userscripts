@@ -662,17 +662,83 @@
         document.getElementById('nh-settings-cancel').onclick = () => closeModal();
         overlay.onclick = (e) => { if (e.target === overlay) closeModal(); };
 
+        const RELOAD_REQUIRED_KEYS = new Set([
+            'enableTranslation',
+            'enableHoverPreview',
+            'enablePopupHoverPreview',
+            'enableInfiniteScroll'
+        ]);
+
         document.getElementById('nh-settings-save').onclick = async () => {
             const patch = readSettingsForm();
             closeModal();
             // 没有改动时不刷新页面，保留无限滚动已加载的内容和滚动位置。
             if (!hasSettingsChanges(patch)) return;
+            const changedKeys = Object.keys(patch).filter(key => !isSettingValueEqual(Config.get(key), patch[key]));
+            const needsReload = changedKeys.some(key => RELOAD_REQUIRED_KEYS.has(key));
             const disablingMetaCache = Config.get('enableMetaPersistentCache') !== false
                 && patch.enableMetaPersistentCache === false;
             Config.setMany(patch);
-            // 关闭持久缓存时先清空已缓存的数据再刷新。
+            // 关闭持久缓存时先清空已缓存的数据。
             if (disablingMetaCache) await GalleryMetaStore.clear();
-            location.reload();
+            if (needsReload) {
+                location.reload();
+                return;
+            }
+
+            // 非结构性开关/参数热更新：保留当前页面、无限滚动已追加内容与滚动位置。
+            if (changedKeys.includes('showPageSettingsButton')) updatePageSettingsButton();
+            if (changedKeys.includes('showLangDropDown') || changedKeys.includes('langFilter')) {
+                document.getElementById('nh-lang-filter')?.remove();
+                setupLanguageFilterUI();
+                runLanguageFilter(document, Config.get('langFilter'));
+            }
+            if (changedKeys.includes('enableFullBlacklistHide')) {
+                SiteBlacklist.apply(document);
+            }
+            if (changedKeys.includes('translationMode')) {
+                states.forEach(state => { state.tagsHtml = ''; });
+                resetTagTranslationState(document);
+                runContentTranslation(document);
+            }
+            if (changedKeys.includes('uploadTimeDisplayMode')) {
+                queryAll(document, 'time').forEach(t => {
+                    delete t.dataset.nhTranslatedTime;
+                    delete t.dataset.nhTranslatedAt;
+                });
+                runUITranslation(document);
+            }
+            if (changedKeys.includes('showPageNumbers')) {
+                if (!Config.get('showPageNumbers')) {
+                    queryAll(document, '.nh-page-number').forEach(el => el.remove());
+                    queryAll(document, GALLERY_SELECTORS.coverLink).forEach(cover => { delete cover.dataset.pageProcessed; });
+                } else {
+                    GalleryMeta.refresh(document);
+                }
+            }
+            if (changedKeys.includes('enableSuggestions') || changedKeys.includes('searchSuggestionMode')) {
+                clearSearchSuggestionBox();
+            }
+            if (changedKeys.includes('enableQuickTags') || changedKeys.includes('quickTagsSettings')) {
+                document.getElementById('nh-helper-quick-tags')?.remove();
+                setupSearchUI();
+            }
+            if (changedKeys.includes('popupHoverPreviewImageScalePercent') || changedKeys.includes('popupHoverPreviewPosition')) {
+                syncPreviewPopupSettings();
+            }
+            if (changedKeys.some(k => k.startsWith('readingMode') || k === 'enableReadingMode')) {
+                ReadingMode.refresh();
+                applyReadingProgressBadges(getGalleryNodes(document));
+            }
+            if (changedKeys.includes('enableDetailQuickBlacklist')) {
+                void refreshDetailQuickBlacklistButtons(document);
+            }
+            if (changedKeys.includes('enableUserSettingsBlacklistFilter')) {
+                UserSettingsBlacklistFilter.apply(document);
+            }
+            if (changedKeys.includes('showDevPanel')) {
+                Diagnostics.sync();
+            }
         };
     }
 

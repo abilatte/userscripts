@@ -6,6 +6,19 @@
 
     const SEARCH_SUGGESTION_ITEM_ID_PREFIX = 'nh-helper-suggestion-';
 
+    function normalizeSearchNamespace(rawNs = '') {
+        const map = {
+            tag: 'tag', tags: 'tag',
+            category: 'tag', categories: 'tag',
+            artist: 'artist', artists: 'artist',
+            group: 'group', groups: 'group',
+            parody: 'parody', parodies: 'parody',
+            character: 'character', characters: 'character',
+            language: 'language', languages: 'language'
+        };
+        return map[String(rawNs || '').trim().toLowerCase()] || '';
+    }
+
     function clearSearchSuggestionBox() {
         document.querySelectorAll('.nh-helper-suggestion-box').forEach(box => box.remove());
         // 只清理本脚本设置的 aria-activedescendant，不动官方联想自己的属性。
@@ -188,12 +201,15 @@
                 const clean = token.replace(/^"|"$/g, '');
                 const isExcluded = token.startsWith('-');
                 const lookupTerm = isExcluded ? clean.substring(1) : clean;
-                const lookupKey = lookupTerm.toLowerCase();
-                let item = DB.cnToItem[lookupKey];
-                if (!item && lookupTerm.includes(':')) {
-                    const parts = lookupTerm.split(':');
-                    const namespacedKey = parts.length > 1 ? parts[1].replace(/"/g, '').toLowerCase() : '';
-                    if (namespacedKey && DB.cnToItem[namespacedKey]) item = DB.cnToItem[namespacedKey];
+                const nsMatch = lookupTerm.match(/^([a-zA-Z0-9_]+):(.*)$/);
+                let item = null;
+                let userNs = '';
+                if (nsMatch) {
+                    userNs = normalizeSearchNamespace(nsMatch[1]);
+                    const namespacedKey = nsMatch[2].replace(/^"|"$/g, '').trim().toLowerCase();
+                    if (namespacedKey) item = DB.lookupCnItem(namespacedKey, userNs);
+                } else {
+                    item = DB.lookupCnItem(lookupTerm);
                 }
                 if (item) {
                     const pluralNs = NS_PLURAL_MAP[item.namespace] || item.namespace;
@@ -265,8 +281,13 @@
             const raw = input.value;
             const caret = getInputCaret();
             const head = raw.slice(0, caret);
-            const tail = raw.slice(caret).replace(/^\s+/, '');
+            let tail = raw.slice(caret);
             const matchStr = suggestionItem.originalMatch;
+            const hasOpenQuote = ((String(matchStr || '').match(/"/g) || []).length % 2) === 1;
+            if (hasOpenQuote && tail.startsWith('"')) {
+                tail = tail.slice(1);
+            }
+            tail = tail.replace(/^\s+/, '');
             const lastIndex = head.lastIndexOf(matchStr);
             let finalValue = suggestionItem.finalValue;
             if (event && event.shiftKey && !finalValue.startsWith('-')) finalValue = '-' + finalValue;
@@ -297,7 +318,7 @@
             if (!Config.get('enableSuggestions') || getSearchSuggestionMode() === 'off') {
                 clearSearchSuggestionBox();
                 lastSuggestions = [];
-                if (qtContainer) qtContainer.style.display = 'flex';
+                if (searchUiActiveQuickTags) searchUiActiveQuickTags.style.display = 'flex';
                 return;
             }
             // 搜索索引懒加载：第一次聚焦搜索框时才启动 Worker 建索引。
@@ -320,7 +341,7 @@
                     }, 500);
                 }
             } else handleInput();
-            if (qtContainer) qtContainer.style.display = 'flex';
+            if (searchUiActiveQuickTags) searchUiActiveQuickTags.style.display = 'flex';
         });
         input.addEventListener('blur', () => {
             if (document.activeElement !== input) {
@@ -333,7 +354,7 @@
             const box = document.querySelector('.nh-helper-suggestion-box');
             if (e.key === 'Escape') {
                 if (box) clearSearchSuggestionBox();
-                if (qtContainer) qtContainer.style.display = 'none';
+                if (searchUiActiveQuickTags) searchUiActiveQuickTags.style.display = 'none';
                 return;
             }
             if (!box) return;

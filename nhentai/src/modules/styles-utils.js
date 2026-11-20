@@ -52,10 +52,11 @@
             --nh-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
         }
 
-        .nh-helper-suggestion-box { position: absolute; background: var(--nh-color-bg); border: 1px solid var(--nh-color-border); border-top: none; font-size: var(--nh-font-size-lg); color: var(--nh-color-text); z-index: 1001; width: 100%; max-height: 300px; overflow-y: auto; box-shadow: 0 8px 16px rgba(0,0,0,0.6); border-radius: 0 0 5px 5px; }
+        .nh-helper-suggestion-box { position: absolute; top: 100%; left: 0; right: 0; background: var(--nh-color-bg); border: 1px solid var(--nh-color-border); border-top: none; font-size: var(--nh-font-size-lg); color: var(--nh-color-text); z-index: 1001; width: 100%; max-height: 300px; overflow-y: auto; box-shadow: 0 8px 16px rgba(0,0,0,0.6); border-radius: 0 0 5px 5px; }
         .nh-helper-suggestion-box::-webkit-scrollbar { width: 6px; }
         .nh-helper-suggestion-box::-webkit-scrollbar-thumb { background: var(--nh-color-border); border-radius: 3px; }
         form[action="/search/"].nh-helper-cn-suggestion-active > [role="listbox"] { display: none !important; }
+        form[action="/search/"]:has(.nh-helper-suggestion-box) #nh-helper-quick-tags { display: none !important; }
         .nh-helper-suggestion-item { padding: 6px 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--nh-color-bg-elevated); display: flex; align-items: center; transition: background-color 0.1s; }
         .nh-helper-suggestion-item:hover, .nh-helper-suggestion-item.active { background-color: var(--nh-color-accent); color: #fff; }
         body.nh-shift-pressed .nh-helper-suggestion-item:hover, body.nh-shift-pressed .nh-helper-suggestion-item.active { background-color: var(--nh-color-danger); }
@@ -649,6 +650,7 @@
         .nh-lang-item.selected .nh-lang-checkbox { background-color: var(--nh-color-accent); border-color: var(--nh-color-accent); }
         .nh-lang-item.selected .nh-lang-checkbox::after { content: "✓"; color: #fff; font-size: 10px; line-height: 1; }
         .nh-helper-hidden { display: none !important; }
+        .ad-wrapper, .advertisement { display: none !important; }
         .gallery.blacklisted,
         .gallery.nh-site-blacklisted {
             display: none !important;
@@ -1178,7 +1180,7 @@
         }
         .nh-reading-scrollbar-item {
             flex: 1 1 0;
-            min-height: 3px;
+            min-height: 0;
             padding: 0;
             border: none;
             border-radius: 0;

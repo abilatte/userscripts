@@ -217,13 +217,25 @@
             const url = api?.cdn?.image?.(path, attempt);
             return typeof url === 'string' ? url : '';
         },
+        getThumbUrl(path = '', attempt = 0) {
+            if (!path) return '';
+            const api = this.getApi();
+            const url = api?.cdn?.thumb?.(path, attempt);
+            return typeof url === 'string' ? url : '';
+        },
         syncCdnFromPageData() {
             const data = this.getData();
             const servers = data?.cdn?.image_servers;
+            const thumbServers = data?.cdn?.thumb_servers;
+            let synced = false;
             if (Array.isArray(servers) && servers.length) {
                 CDN.imageServers = servers;
-                return true;
+                synced = true;
             }
-            return false;
+            if (Array.isArray(thumbServers) && thumbServers.length) {
+                CDN.thumbServers = thumbServers;
+                synced = true;
+            }
+            return synced;
         }
     };

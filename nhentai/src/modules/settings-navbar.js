@@ -417,22 +417,29 @@
 
     let langFilterOutsideClickBound = false;
 
-    function setupLanguageFilterUI() {
-        const navLeft = document.querySelector('ul.menu.left');
-        if (!navLeft) return;
-
-        Array.from(navLeft.children).forEach(child => {
+    function cleanNavbarPromoItems(container) {
+        if (!container) return;
+        Array.from(container.children).forEach(child => {
+            if (child.classList?.contains('dropdown')) return;
             const text = child.textContent.trim().toLowerCase();
             const link = child.querySelector('a');
-            const href = link ? link.href.toLowerCase() : '';
+            const href = (link?.getAttribute('href') || link?.href || '').toLowerCase();
 
-            const isAI = text.includes('ai jerk off') || text.includes('ai porn');
+            const isAI = text.includes('ai jerk off') || text.includes('ai porn') || text.includes('ai sluts') || href.includes('tsyndicate.com');
             const isTwitter = href.includes('twitter.com') || href.includes('x.com') || child.querySelector('.fa-twitter');
 
             if (isAI || isTwitter) {
                 child.remove();
             }
         });
+    }
+
+    function setupLanguageFilterUI() {
+        const navLeft = document.querySelector('ul.menu.left');
+        if (!navLeft) return;
+
+        cleanNavbarPromoItems(navLeft);
+        cleanNavbarPromoItems(navLeft.querySelector('ul.dropdown-menu'));
 
         if (!Config.get('showLangDropDown')) return;
 

@@ -177,7 +177,9 @@
         }
 
         const processContainer = (container) => {
-            const ns = detectTagNamespaceFromText(container.textContent);
+            const headerText = typeof getTagContainerHeader === 'function' ? getTagContainerHeader(container) : '';
+            const mappedNs = mapTagHeaders[headerText];
+            const ns = (mappedNs && mappedNs !== 'pages') ? mappedNs : detectTagNamespaceFromText(headerText || container.textContent);
             container.querySelectorAll(`.tags ${TAG_NAME_SELECTOR}`).forEach(el => translateTagElement(el, ns));
         };
         if (context.classList && context.classList.contains('tag-container')) processContainer(context);

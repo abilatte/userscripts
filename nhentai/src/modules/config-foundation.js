@@ -63,6 +63,7 @@
     const API_ENDPOINTS = {
         galleryV2: (id) => `/api/v2/galleries/${id}`,
         legacyGallery: (id) => `/api/gallery/${id}`,
+        popularGalleries: '/api/v2/galleries/popular',
         cdnConfig: '/api/v2/cdn',
         blacklist: '/api/v2/blacklist',
         blacklistIds: '/api/v2/blacklist/ids'
@@ -274,6 +275,8 @@
     const Dict = {
         Nav: {
             "Login": "登录",
+            "Sign in": "登录",
+            "Sign In": "登录",
             "Register": "注册",
             "Log out": "注销",
             "Log Out": "注销",
@@ -283,7 +286,10 @@
             "New Uploads": "最新上传",
             "Popular Now": "当前热门",
             "Uploaded": "上传时间",
-            "Popular": "热门"
+            "Popular": "热门",
+            "Community": "社区",
+            "Taxonomy": "标签分类",
+            "GTS Backlog": "待审标签"
         },
         Meta: {
             "Title": "标题",
@@ -369,7 +375,9 @@
             "Category": "分类",
             "Black": "黑色",
             "Blue": "蓝色",
-            "Light": "浅色"
+            "Light": "浅色",
+            "Pending": "待定",
+            "pending": "待定"
         },
         SiteUI: {
             "Username": "用户名",
@@ -401,6 +409,23 @@
             "Download Torrent": "下载种子",
             "Show all": "显示全部",
             "More like this": "相似推荐",
+            "More Like This": "相似推荐",
+            "Save this search": "保存此搜索",
+            "☆ Save this search": "☆ 保存此搜索",
+            "★ Saved": "★ 已保存",
+            "Saved searches": "已保存的搜索",
+            "Recent searches": "最近搜索",
+            "Search for": "搜索",
+            "Search title text": "搜索标题文本",
+            "Search Japanese title": "搜索日文标题",
+            "Name (optional)": "名称（选填）",
+            "Leave blank to use the query": "留空则使用搜索词本身",
+            "You need to log in to add favorites": "登录后才能添加收藏",
+            "You need to log in to download": "登录后才能下载",
+            "Log in to vote": "登录后参与投票",
+            "help shape this gallery's tags": "协助完善本画廊的标签",
+            "You're leaving nhentai": "即将离开 nhentai",
+            "Open in new tab": "在新标签页打开",
             "Are you sure you want to log out?": "真的要注销吗？",
             "No, take me back": "不，回到之前的页面",
             "No, take me back.": "不，回到之前的页面。",
@@ -484,7 +509,12 @@
         'Groups': '社团',
         'Info': '关于',
         'Favorites': '收藏',
-        'Log out': '注销'
+        'Log out': '注销',
+        'Sign in': '登录',
+        'Register': '注册',
+        'Community': '社区',
+        'Taxonomy': '标签分类',
+        'GTS Backlog': '待审标签'
     };
 
     const specialTagValueTranslations = {

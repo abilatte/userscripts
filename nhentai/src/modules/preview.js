@@ -35,10 +35,9 @@
 
         tags.forEach(t => {
             const count = t.count || 0;
-            const enName = t.name;
-            let cnName = null;
-            if (DB.data[t.type] && DB.data[t.type][enName]) cnName = DB.data[t.type][enName];
-            else if (DB.data.tag && DB.data.tag[enName]) cnName = DB.data.tag[enName];
+            const enName = String(t.name || '');
+            const matched = lookupTagTranslation(enName, t.type, t.url || '');
+            const cnName = matched?.cnName || null;
 
             const safeEn = escapeHtml(enName);
             const safeCn = escapeHtml(cnName);
@@ -237,7 +236,8 @@
         const neededWidth = (img?.clientWidth || 0) * (window.devicePixelRatio || 1);
         if (!thumbPath || !thumbWidth || !neededWidth || neededWidth > thumbWidth * 1.15) return '';
         if (/^https?:\/\//.test(thumbPath)) return thumbPath;
-        return origin ? `${origin}/${thumbPath.replace(/^\/+/, '')}` : '';
+        const official = typeof buildThumbCandidateUrls === 'function' ? buildThumbCandidateUrls(thumbPath)[0] : '';
+        return official || (origin ? `${origin}/${thumbPath.replace(/^\/+/, '')}` : '');
     }
 
     function renderPreviewLoadingState(root, gallery = null) {

@@ -51,7 +51,9 @@
     }
 
     function isUserLoggedIn() {
+        const bridgeUser = window.nhentai_userscript_v1?.get?.()?.user || window.nhentai_data_v1?.user;
+        if (bridgeUser && Number(bridgeUser.id) > 0) return true;
         const app = window._n_app ?? window.n ?? null;
         if (Array.isArray(app?.options?.blacklisted_tags)) return true;
-        return !queryOne(document, '.menu-sign-in a[href="/login/"]');
+        return !queryOne(document, '.menu-sign-in a[href^="/login"]');
     }

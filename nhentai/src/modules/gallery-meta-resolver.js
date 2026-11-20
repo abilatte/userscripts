@@ -3,6 +3,9 @@
         activeEntry: null,
         inFlightSignature: '',
         inFlightPromise: null,
+        popularInFlightPromise: null,
+        popularFetchedAt: 0,
+        popularCacheTtlMs: 60 * 1000,
         tagIdCache: new Map(),
         failedSignature: '',
         failedAt: 0,
@@ -183,6 +186,20 @@
             };
         },
 
+        storeInlineEntries(entries = []) {
+            if (!Array.isArray(entries) || !entries.length) return;
+            entries.forEach(entry => {
+                const id = String(entry?.id || entry?.galleryId || '');
+                if (!id) return;
+                const stored = this.normalizeStoredMeta(entry);
+                partialCache.set(id, stored.meta);
+                if (stored.complete) {
+                    cache.set(id, stored.meta);
+                }
+            });
+            rememberGalleryListEntries(entries);
+        },
+
         storeEntries(signature, entries) {
             const byId = new Map();
             entries.forEach(entry => {
@@ -190,14 +207,37 @@
                 if (!id) return;
                 const stored = this.normalizeStoredMeta(entry);
                 byId.set(id, stored);
+                partialCache.set(id, stored.meta);
                 if (stored.complete) {
                     cache.set(id, stored.meta);
                 }
             });
+            rememberGalleryListEntries(entries);
             const stored = { signature, fetchedAt: Date.now(), byId };
             this.activeSignature = signature;
             this.activeEntry = stored;
             return stored;
+        },
+
+        async ensurePopularEntries() {
+            if ((Date.now() - this.popularFetchedAt) < this.popularCacheTtlMs) {
+                return null;
+            }
+            if (this.popularInFlightPromise) {
+                return this.popularInFlightPromise;
+            }
+            this.popularInFlightPromise = this.fetchJson(API_ENDPOINTS.popularGalleries)
+                .then(payload => {
+                    const entries = this.unwrapList(payload);
+                    this.storeInlineEntries(entries);
+                    this.popularFetchedAt = Date.now();
+                    return entries;
+                })
+                .catch(() => null)
+                .finally(() => {
+                    this.popularInFlightPromise = null;
+                });
+            return this.popularInFlightPromise;
         },
 
         async ensureContextEntries(targetIds = []) {
@@ -242,10 +282,17 @@
         async resolve(id, { allowPartial = false } = {}) {
             const targetId = String(id || '');
             if (!targetId) return null;
+            const fullCached = cache.get(targetId);
+            if (fullCached) return fullCached;
             const userscriptMeta = this.getUserscriptMeta(targetId, { allowPartial });
             if (userscriptMeta) {
-                cache.set(targetId, userscriptMeta);
+                if (isCompleteMeta(userscriptMeta)) cache.set(targetId, userscriptMeta);
+                else partialCache.set(targetId, userscriptMeta);
                 return userscriptMeta;
+            }
+            if (allowPartial) {
+                const partialCached = partialCache.get(targetId);
+                if (partialCached) return partialCached;
             }
             const context = this.getContext();
             if (!context) return null;
@@ -256,7 +303,18 @@
             }
 
             const entry = await this.ensureContextEntries([targetId]);
-            return this.getStoredMeta(entry, targetId, allowPartial);
+            const resolved = this.getStoredMeta(entry, targetId, allowPartial);
+            if (resolved) return resolved;
+
+            if (allowPartial) {
+                const partialAfterEnsure = partialCache.get(targetId);
+                if (partialAfterEnsure) return partialAfterEnsure;
+                if (context.type === 'home') {
+                    await this.ensurePopularEntries();
+                    return partialCache.get(targetId) || null;
+                }
+            }
+            return null;
         },
 
         prewarm(galleryIds = []) {
@@ -281,11 +339,15 @@
 
         rememberUserscriptCurrentGallery(data = NhentaiUserscriptBridge.getData()) {
             const gallery = data?.gallery;
+            if (Array.isArray(gallery?.related) && gallery.related.length) {
+                this.storeInlineEntries(gallery.related);
+            }
             if (!gallery?.id) return null;
             const normalized = normalizeGalleryMeta(gallery);
             if (!isCompleteMeta(normalized)) return null;
             const id = String(gallery.id);
             cache.set(id, normalized);
+            partialCache.set(id, normalized);
             this.rememberResolvedMeta(id, normalized);
             return normalized;
         }

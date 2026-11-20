@@ -81,6 +81,7 @@
         consecutiveEmptyPages: 0,
         pausedForEmptyPages: false,
         offscreenObserver: null,
+        tagIdBySlugCache: new Map(),
 
         isListPage() {
             if (!Config.get('enableInfiniteScroll')) return false;
@@ -151,7 +152,10 @@
         },
 
         syncNextUrlFromDom(root = this.getContentRoot(), { preserveWhenMissing = false, source = 'dom' } = {}) {
-            const nextUrl = this.getNextUrl(root) || this.deriveUserscriptNextUrl() || this.deriveImplicitNextUrl();
+            const domNextUrl = this.getNextUrl(root);
+            const hasApiAppendedPages = this.hasAppendedPageNodes(root) && Boolean(this.lastLoadedPageUrl);
+            const nextUrl = domNextUrl
+                || (hasApiAppendedPages ? '' : (this.deriveUserscriptNextUrl() || this.deriveImplicitNextUrl()));
             recordInfiniteScrollDebug('lastNextUrlSyncSource', `${source}:${nextUrl ? 'hit' : 'miss'}${!nextUrl && preserveWhenMissing ? ':preserved' : ''}`);
             if (nextUrl || !preserveWhenMissing) {
                 this.nextUrl = nextUrl;
@@ -161,6 +165,11 @@
 
         syncNextUrlFromUserscriptPagination(pagination = null) {
             if (!this.isListPage()) return;
+            if (this.hasAppendedPageNodes() && this.lastLoadedPageUrl) {
+                const loadedPage = this.getPageNumberFromUrl(this.lastLoadedPageUrl);
+                const bridgePage = Number(pagination?.page || 0);
+                if (loadedPage > bridgePage) return;
+            }
             const nextUrl = this.deriveUserscriptNextUrl(pagination);
             if (!nextUrl && this.hasNextPage()) return;
             this.nextUrl = nextUrl;
@@ -574,7 +583,123 @@
             };
         },
 
-        appendLoadedPage(contentRoot, container, pagination, pageNumber) {
+        async resolveApiTagId(namespace, slug) {
+            const key = `${namespace}:${slug}`;
+            if (this.tagIdBySlugCache.has(key)) return this.tagIdBySlugCache.get(key);
+            const currentTag = NhentaiUserscriptBridge.getCurrentTag();
+            if (
+                currentTag
+                && String(currentTag.type || '') === String(namespace)
+                && String(currentTag.slug || '') === String(slug)
+                && Number(currentTag.id) > 0
+            ) {
+                const tagId = Number(currentTag.id);
+                this.tagIdBySlugCache.set(key, tagId);
+                return tagId;
+            }
+            const payload = await requestNhentaiApiJson(`/api/v2/tags/${encodeURIComponent(namespace)}/${encodeURIComponent(slug)}`, {
+                method: 'GET'
+            });
+            const tagId = Number(payload?.id || payload?.result?.id || payload?.data?.id || 0);
+            if (tagId > 0) {
+                this.tagIdBySlugCache.set(key, tagId);
+                return tagId;
+            }
+            return 0;
+        },
+
+        buildGalleryListContainerFromEntries(entries, pathname = location.pathname) {
+            const isSearchGrid = /^\/search\/?$/.test(pathname) || Boolean(queryOne(this.getContentRoot(), '.gallery-grid'));
+            const container = document.createElement('div');
+            container.className = isSearchGrid ? 'gallery-grid' : 'container index-container';
+
+            entries.forEach(entry => {
+                const id = String(entry?.id || '');
+                if (!id) return;
+                const tagIds = Array.isArray(entry.tag_ids)
+                    ? entry.tag_ids.map(tid => Number(tid)).filter(tid => Number.isFinite(tid) && tid > 0)
+                    : [];
+
+                const gallery = document.createElement('div');
+                gallery.className = 'gallery';
+                if (tagIds.includes(Number(LANG_IDS.CHINESE))) gallery.classList.add('lang-cn');
+                if (tagIds.includes(Number(LANG_IDS.ENGLISH))) gallery.classList.add('lang-gb');
+                if (tagIds.includes(Number(LANG_IDS.JAPANESE))) gallery.classList.add('lang-jp');
+                if (tagIds.length) gallery.dataset.nhTagIds = tagIds.join(' ');
+                if (entry.blacklisted === true) gallery.dataset.nhBlacklisted = 'true';
+
+                const cover = document.createElement('a');
+                cover.className = 'cover';
+                cover.href = `/g/${id}/`;
+                const tw = Number(entry.thumbnail_width) || 0;
+                const th = Number(entry.thumbnail_height) || 0;
+                const paddingRatio = (tw > 0 && th > 0) ? ((th / tw) * 100).toFixed(2).replace(/\.00$/, '') : '140';
+                cover.style.padding = `0 0 ${paddingRatio}%`;
+
+                const title = String(entry.english_title || entry.japanese_title || '');
+                const img = document.createElement('img');
+                img.loading = 'lazy';
+                img.className = 'lazyload';
+                img.alt = title;
+                const thumbPath = typeof entry.thumbnail === 'string' ? entry.thumbnail : (entry.thumbnail?.path || '');
+                const thumbSrc = buildThumbCandidateUrls(thumbPath)[0] || '';
+                if (thumbSrc) img.src = thumbSrc;
+
+                const caption = document.createElement('div');
+                caption.className = 'caption';
+                caption.textContent = title;
+
+                cover.appendChild(img);
+                cover.appendChild(caption);
+                gallery.appendChild(cover);
+                container.appendChild(gallery);
+            });
+
+            return container;
+        },
+
+        async fetchNextPageViaApi(requestUrl) {
+            const parsed = new URL(requestUrl, location.origin);
+            const pathname = parsed.pathname;
+            const page = this.getPageNumberFromUrl(requestUrl);
+            const sort = parsed.searchParams.get('sort') || 'date';
+            let endpoint = '';
+
+            if (pathname === '/') {
+                endpoint = `/api/v2/galleries?page=${page}`;
+            } else if (/^\/search\/?$/.test(pathname)) {
+                const query = parsed.searchParams.get('q') || '';
+                endpoint = `/api/v2/search?query=${encodeURIComponent(query)}&sort=${encodeURIComponent(sort)}&page=${page}`;
+            } else {
+                const nsMatch = pathname.match(/^\/(tag|artist|group|parody|character|language|category)\/([^/]+)\/?$/);
+                if (!nsMatch) return null;
+                const tagId = await this.resolveApiTagId(nsMatch[1], decodeURIComponent(nsMatch[2]));
+                if (!tagId) return null;
+                endpoint = `/api/v2/galleries/tagged?tag_id=${tagId}&sort=${encodeURIComponent(sort)}&page=${page}`;
+            }
+
+            const payload = await requestNhentaiApiJson(endpoint, { method: 'GET' });
+            const entries = Array.isArray(payload?.result)
+                ? payload.result
+                : (Array.isArray(payload?.galleries) ? payload.galleries : []);
+            if (!entries.length) return null;
+
+            rememberGalleryListEntries(entries);
+            const container = this.buildGalleryListContainerFromEntries(entries, pathname);
+            const numPages = Number(payload?.num_pages || 0);
+            const nextPageUrl = (Number.isFinite(numPages) && numPages > page)
+                ? NhentaiUserscriptBridge.buildPageUrl(page + 1, requestUrl)
+                : '';
+
+            return {
+                container,
+                pagination: null,
+                nextPageUrl,
+                entries
+            };
+        },
+
+        appendLoadedPage(contentRoot, container, pagination, pageNumber, entries = null) {
             this.removeExistingPagination(contentRoot);
             const shouldWrapSearchGrid = container.matches?.('.gallery-grid');
             const pageMarker = this.markInfiniteAppended(this.createPageMarker(pageNumber));
@@ -597,7 +722,10 @@
                 }
             }
             this.ensureSentinel(contentRoot);
-            refreshGalleryEnhancements(container, { translate: true });
+            refreshGalleryEnhancements(container, {
+                translate: true,
+                metaData: entries ? { galleries: entries } : undefined
+            });
             this.observeOffscreenPage(container);
             this.trackEmptyPage(container);
         },
@@ -793,15 +921,36 @@
             this.setStatus('loading');
 
             try {
-                const res = await fetch(requestUrl, { credentials: 'same-origin' });
-                if (!this.isRequestTokenActive(requestToken)) return;
-                if (!res.ok) {
-                    throw new Error(res.statusText || `HTTP ${res.status}`);
+                // 优先走 /api/v2/* 列表 JSON：规避 Cloudflare 对 fetch(HTML) 的 403 拦截，且自带页数与标签元数据。
+                let apiResult = null;
+                try {
+                    apiResult = await this.fetchNextPageViaApi(requestUrl);
+                } catch (apiError) {
+                    apiResult = null;
                 }
-
-                const htmlText = await res.text();
                 if (!this.isRequestTokenActive(requestToken)) return;
-                const { container, pagination } = this.parseNextPageDocument(htmlText);
+
+                let container = null;
+                let pagination = null;
+                let entries = null;
+
+                if (apiResult?.container) {
+                    container = apiResult.container;
+                    pagination = null;
+                    entries = apiResult.entries;
+                } else {
+                    const res = await fetch(requestUrl, { credentials: 'same-origin' });
+                    if (!this.isRequestTokenActive(requestToken)) return;
+                    if (!res.ok) {
+                        throw new Error(res.statusText || `HTTP ${res.status}`);
+                    }
+
+                    const htmlText = await res.text();
+                    if (!this.isRequestTokenActive(requestToken)) return;
+                    const parsedDoc = this.parseNextPageDocument(htmlText);
+                    container = parsedDoc.container;
+                    pagination = parsedDoc.pagination;
+                }
 
                 if (!container) {
                     throw new Error('Infinite scroll container not found');
@@ -817,12 +966,18 @@
                 this.lastLoadedPageUrl = requestUrl;
                 this.resetPaginationRecovery();
                 this.resetRetryState();
-                this.nextUrl = pagination?.querySelector('a.next')?.href || '';
-                this.normalizeNewGalleryNodes(container);
+                if (apiResult) {
+                    this.nextUrl = apiResult.nextPageUrl || '';
+                } else {
+                    this.nextUrl = pagination?.querySelector('a.next')?.href || '';
+                    this.normalizeNewGalleryNodes(container);
+                }
 
-                this.appendLoadedPage(latestContentRoot, container, pagination, pageNumber);
+                this.appendLoadedPage(latestContentRoot, container, pagination, pageNumber, entries);
                 if (!this.isRequestTokenActive(requestToken)) return;
-                this.syncNextUrlFromDom(latestContentRoot, { preserveWhenMissing: true });
+                if (!apiResult) {
+                    this.syncNextUrlFromDom(latestContentRoot, { preserveWhenMissing: true });
+                }
                 this.syncRouteAfterAppend(requestUrl);
                 this.finishLoadWithObserver();
             } catch (error) {

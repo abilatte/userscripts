@@ -1,4 +1,6 @@
     // ===== 3.5 画廊元数据归一化与列表辅助 =====
+    const galleryListMetaCache = new LRUCache(1500);
+
     function normalizeGalleryTagIds(data) {
         const rawTagIds = Array.isArray(data?.tag_ids) ? data.tag_ids : [];
         const fallbackTagIds = Array.isArray(data?.tags)
@@ -43,6 +45,9 @@
         }).filter(Boolean);
 
         const tagIds = normalizeGalleryTagIds(data);
+        const thumbnail = typeof data.thumbnail === 'string'
+            ? data.thumbnail
+            : (data.thumbnail?.path || data.cover?.path || '');
         return {
             galleryId: data.id || null,
             mediaId,
@@ -52,8 +57,28 @@
             tagIds,
             blacklisted: data.blacklisted === true,
             tags: Array.isArray(data.tags) ? data.tags : [],
+            thumbnail,
+            thumbnailWidth: Number(data.thumbnail_width || data.thumbnail?.width || data.cover?.width) || 0,
+            thumbnailHeight: Number(data.thumbnail_height || data.thumbnail?.height || data.cover?.height) || 0,
+            englishTitle: data.english_title || data.title?.english || '',
+            japaneseTitle: data.japanese_title || data.title?.japanese || '',
             title: data.title?.english || data.title?.japanese || data.title?.pretty || data.english_title || data.japanese_title || ''
         };
+    }
+
+    function rememberGalleryListEntries(entries = []) {
+        if (!Array.isArray(entries)) return [];
+        const normalizedList = [];
+        entries.forEach(entry => {
+            const id = String(entry?.id || entry?.galleryId || '');
+            if (!id) return;
+            const meta = (entry?.galleryId && Array.isArray(entry?.tag_ids))
+                ? entry
+                : normalizeGalleryMeta(entry);
+            galleryListMetaCache.set(id, meta);
+            normalizedList.push(meta);
+        });
+        return normalizedList;
     }
 
     function getGalleryNodeId(gallery) {
@@ -67,10 +92,16 @@
     function getGalleryNodeListMeta(gallery) {
         const id = getGalleryNodeId(gallery);
         if (!id) return null;
+        const cached = galleryListMetaCache.get(id);
+        if (cached) return cached;
         const data = NhentaiUserscriptBridge.getData();
-        const entries = Array.isArray(data?.galleries) ? data.galleries : [];
-        const entry = entries.find(item => String(item?.id || '') === id);
-        return entry ? normalizeGalleryMeta(entry) : null;
+        if (Array.isArray(data?.galleries) && data.galleries.length) {
+            rememberGalleryListEntries(data.galleries);
+        }
+        if (Array.isArray(data?.gallery?.related) && data.gallery.related.length) {
+            rememberGalleryListEntries(data.gallery.related);
+        }
+        return galleryListMetaCache.get(id) || null;
     }
 
     function syncGalleryNodeMetaState(gallery) {

@@ -214,6 +214,10 @@
                 }
 
                 if (!this.hasSyncedOnce && this.syncAttempts < this.maxSyncAttempts) {
+                    if (!this.getApp() && NhentaiUserscriptBridge.getData()) {
+                        this.hasSyncedOnce = true;
+                        return;
+                    }
                     this.scheduleSync(Math.min(1800, delay + 200));
                 }
             }, delay);
@@ -351,8 +355,8 @@
         }
         if (resetGalleryState) {
             resetGalleryEnhancementState(document);
+            resetTagTranslationState(document);
         }
-        resetTagTranslationState(document);
         refreshNavbarUI();
         runUITranslation(document);
         refreshGalleryEnhancements(document, { translate: true });

@@ -143,6 +143,9 @@
         totalPages: 0,
         isOpening: false,
         saveTimer: null,
+        scrollbarRaf: 0,
+        dragPrimeTimer: null,
+        lastDragApproximatePage: 1,
         scrollbarItems: new Map(),
 
         isEnabled() {
@@ -556,10 +559,18 @@
 
         handleReaderScroll() {
             this.lastReaderScrollAt = Date.now();
-            this.updateScrollbarThumb();
+            this.scheduleScrollbarThumbUpdate();
             // 自动滚动每帧都会触发 scroll，工具栏已在开始时收起，不必每帧再处理。
             if (this.autoScrolling) return;
             this.hideTools({ force: true });
+        },
+
+        scheduleScrollbarThumbUpdate() {
+            if (this.scrollbarRaf) return;
+            this.scrollbarRaf = requestAnimationFrame(() => {
+                this.scrollbarRaf = 0;
+                this.updateScrollbarThumb();
+            });
         },
 
         handleToolPanelActivity(event) {
@@ -673,9 +684,18 @@
             this.updateScrollbarThumb();
 
             const approximatePage = Math.max(1, Math.min(this.totalPages, Math.round(normalized * Math.max(0, this.totalPages - 1)) + 1));
+            this.lastDragApproximatePage = approximatePage;
             this.updateActiveScrollbarItem(approximatePage);
             this.updateScrollbarPopper(approximatePage);
-            this.primeNearbyImages(Math.max(0, approximatePage - 1));
+            if (this.isDraggingScrollbar) {
+                clearTimeout(this.dragPrimeTimer);
+                this.dragPrimeTimer = setTimeout(() => {
+                    this.dragPrimeTimer = null;
+                    if (this.isOpen()) this.primeNearbyImages(Math.max(0, approximatePage - 1));
+                }, 80);
+            } else {
+                this.primeNearbyImages(Math.max(0, approximatePage - 1));
+            }
         },
 
         beginScrollbarDrag(pointerId) {
@@ -689,6 +709,13 @@
             this.scrollbarPointerId = null;
             this.isDraggingScrollbar = false;
             this.scrollbarRoot?.classList.remove('is-dragging');
+            if (this.dragPrimeTimer) {
+                clearTimeout(this.dragPrimeTimer);
+                this.dragPrimeTimer = null;
+                if (this.isOpen()) {
+                    this.primeNearbyImages(Math.max(0, (this.lastDragApproximatePage || this.currentPage) - 1));
+                }
+            }
         },
 
         handleScrollbarPointerDown(event) {
@@ -892,14 +919,22 @@
             if ((isSpace && !event.shiftKey) || event.key === 'PageDown' || event.key === 'ArrowDown') {
                 event.preventDefault();
                 ReadingMode.hideTools({ force: true });
-                ReadingMode.scrollContainer.scrollBy({ top: step, behavior: 'smooth' });
+                if (ReadingMode.getFitMode() === 'height') {
+                    ReadingMode.scrollToPage(ReadingMode.currentPage + 1, 'smooth');
+                } else {
+                    ReadingMode.scrollContainer.scrollBy({ top: step, behavior: 'smooth' });
+                }
                 return;
             }
 
             if ((isSpace && event.shiftKey) || event.key === 'PageUp' || event.key === 'ArrowUp') {
                 event.preventDefault();
                 ReadingMode.hideTools({ force: true });
-                ReadingMode.scrollContainer.scrollBy({ top: -step, behavior: 'smooth' });
+                if (ReadingMode.getFitMode() === 'height') {
+                    ReadingMode.scrollToPage(ReadingMode.currentPage - 1, 'smooth');
+                } else {
+                    ReadingMode.scrollContainer.scrollBy({ top: -step, behavior: 'smooth' });
+                }
                 return;
             }
 
@@ -1168,6 +1203,14 @@
             Config.flush();
             this.clearSaveTimer();
             this.clearToolAutoHideTimer();
+            if (this.scrollbarRaf) {
+                cancelAnimationFrame(this.scrollbarRaf);
+                this.scrollbarRaf = 0;
+            }
+            if (this.dragPrimeTimer) {
+                clearTimeout(this.dragPrimeTimer);
+                this.dragPrimeTimer = null;
+            }
             this.stopAutoScroll();
             this.teardownObservers();
             this.unbindKeydown();

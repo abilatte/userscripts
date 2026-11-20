@@ -336,7 +336,6 @@
 
         async runAsyncPhase() {
             await initSearchAndTranslation();
-            scheduleRouteRefresh();
         },
 
         async start() {
