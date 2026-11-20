@@ -420,7 +420,10 @@
     function cleanNavbarPromoItems(container) {
         if (!container) return;
         Array.from(container.children).forEach(child => {
-            if (child.classList?.contains('dropdown')) return;
+            if (child.classList?.contains('dropdown')) {
+                child.remove();
+                return;
+            }
             const text = child.textContent.trim().toLowerCase();
             const link = child.querySelector('a');
             const href = (link?.getAttribute('href') || link?.href || '').toLowerCase();
@@ -439,7 +442,6 @@
         if (!navLeft) return;
 
         cleanNavbarPromoItems(navLeft);
-        cleanNavbarPromoItems(navLeft.querySelector('ul.dropdown-menu'));
 
         if (!Config.get('showLangDropDown')) return;
 

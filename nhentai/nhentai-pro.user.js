@@ -3,7 +3,7 @@
 // @name:en nhentai Pro
 // @namespace https://github.com/abilatte
 // @homepageURL https://github.com/abilatte/userscripts
-// @version 2.8.2.19
+// @version 2.8.2.20
 // @description 中文搜索标签、全站标签汉化、封面悬停预览、卷轴阅读、无限滚动与语言筛选
 // @description:en Chinese tag search, site-wide tag translation, cover hover preview, scroll reader, infinite scroll and language filter.
 // @author abilatte
@@ -1781,24 +1781,7 @@
         #nh-web-settings-btn { display: inline-block; vertical-align: middle; }
         ul.menu.left { display: flex !important; flex-wrap: nowrap !important; align-items: center !important; float: left; height: 45px; }
         ul.menu.left > li:not(.dropdown) { display: flex; align-items: center; height: 100%; }
-        ul.menu.left > li.dropdown { position: relative; display: flex; align-items: center; height: 100%; }
-        ul.menu.left > li.dropdown > .dropdown-menu {
-            display: none !important;
-            position: absolute;
-            top: calc(100% + 4px);
-            right: 0;
-            min-width: 140px;
-            z-index: 1005;
-            white-space: nowrap;
-        }
-        ul.menu.left > li.dropdown:hover > .dropdown-menu,
-        ul.menu.left > li.dropdown:focus-within > .dropdown-menu {
-            display: block !important;
-        }
-        ul.menu.left > li.dropdown > .dropdown-menu > li {
-            display: block;
-            height: auto;
-        }
+        ul.menu.left > li.dropdown { display: none !important; }
         #nh-web-settings-btn a { display: flex; align-items: center; height: 100%; color: rgb(217, 217, 217); text-decoration: none; font-weight: bold; padding: 0 15px; transition: color 0.2s; }
         #nh-web-settings-btn a:hover { color: var(--nh-color-text); }
         #nh-web-settings-btn i { margin-right: 5px; font-size: var(--nh-font-size-lg); }
@@ -2542,7 +2525,6 @@
         @media (max-width: 900px) {
             ul.menu.left { flex-wrap: wrap !important; height: auto !important; justify-content: flex-start; row-gap: 4px; }
             ul.menu.left > li:not(.dropdown) { height: auto; min-height: 36px; }
-            ul.menu.left > li.dropdown { height: auto; min-height: 36px; }
             #nh-web-settings-btn a { padding: 0 8px; }
             #nh-lang-filter { margin-left: auto; }
             .nh-lang-container { margin-left: 4px; margin-right: 0; }
@@ -3483,7 +3465,7 @@
     // ===== 5. 搜索、翻译、语言筛选、设置 UI =====
     const SettingsUIDict = {
         'zh': {
-            "title": "nHentai Pro 设置 v2.8.2.19",
+            "title": "nHentai Pro 设置 v2.8.2.20",
             "tab_browse": "浏览",
             "tab_translate": "翻译",
             "tab_search": "搜索与筛选",
@@ -3668,7 +3650,7 @@
             "db_status_failed": "更新失败"
         },
         'en': {
-            "title": "nHentai Pro Settings v2.8.2.19",
+            "title": "nHentai Pro Settings v2.8.2.20",
             "tab_browse": "Browse",
             "tab_translate": "Translate",
             "tab_search": "Search",
@@ -3902,7 +3884,10 @@
     function cleanNavbarPromoItems(container) {
         if (!container) return;
         Array.from(container.children).forEach(child => {
-            if (child.classList?.contains('dropdown')) return;
+            if (child.classList?.contains('dropdown')) {
+                child.remove();
+                return;
+            }
             const text = child.textContent.trim().toLowerCase();
             const link = child.querySelector('a');
             const href = (link?.getAttribute('href') || link?.href || '').toLowerCase();
@@ -3921,7 +3906,6 @@
         if (!navLeft) return;
 
         cleanNavbarPromoItems(navLeft);
-        cleanNavbarPromoItems(navLeft.querySelector('ul.dropdown-menu'));
 
         if (!Config.get('showLangDropDown')) return;
 
@@ -4112,7 +4096,7 @@
                 </div>
                 <div class="nh-modal-tools">
                     <button type="button" id="nh-lang-switch" class="nh-btn nh-btn-secondary nh-lang-switch-btn">${lang === 'zh' ? 'English' : '中文'}</button>
-                    <span class="version">v2.8.2.19</span>
+                    <span class="version">v2.8.2.20</span>
                 </div>
             </div>
 
@@ -4539,7 +4523,7 @@
             SETTINGS_BACKUP_EXCLUDED_KEYS.forEach(key => delete settings[key]);
             const payload = {
                 app: SETTINGS_BACKUP_APP_ID,
-                version: '2.8.2.19',
+                version: '2.8.2.20',
                 exportedAt: new Date().toISOString(),
                 settings,
                 readingProgress: ReadingModeStorage.readAll()
