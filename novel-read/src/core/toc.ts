@@ -8,6 +8,7 @@ const FULL_TOC_TEXT = /^[\s[【]*(查看|进入|點擊|点击)?(全部|完整|�
 const NEXT_PAGE_TEXT = /^[\s[【<«‹]*(下一?[页頁]|next(\s*page)?)[\s\]】>»›→]*$/i;
 /** 目录最多翻的页数（每页通常几百到一千章） */
 const MAX_TOC_PAGES = 50;
+const TOC_CONCURRENCY = 4;
 
 type Filter = (url: string) => boolean;
 
@@ -35,14 +36,30 @@ function anchorUrl(a: HTMLAnchorElement): string {
   return '';
 }
 
+interface AnchorInfo {
+  a: HTMLAnchorElement;
+  url: string;
+  title: string;
+}
+
+function docAnchors(doc: Document): AnchorInfo[] {
+  return [...doc.querySelectorAll('a')].map((a) => ({
+    a,
+    url: anchorUrl(a),
+    title: cleanText(a.textContent),
+  }));
+}
+
 /** 未指定章节过滤时，取 URL 形状相同、数量最多的一组链接作为章节 */
-function resolveFilter(docs: Document[], keep?: Filter): Filter {
+function resolveFilter(parsedDocs: { anchors: AnchorInfo[] }[], keep?: Filter): Filter {
   if (keep) return keep;
   const counts = new Map<string, number>();
-  for (const doc of docs) {
-    for (const a of doc.querySelectorAll('a')) {
-      const url = anchorUrl(a);
-      if (url && cleanText(a.textContent)) counts.set(shape(url), (counts.get(shape(url)) ?? 0) + 1);
+  for (const { anchors } of parsedDocs) {
+    for (const { url, title } of anchors) {
+      if (url && title) {
+        const s = shape(url);
+        counts.set(s, (counts.get(s) ?? 0) + 1);
+      }
     }
   }
   const best = [...counts].sort((x, y) => y[1] - x[1])[0]?.[0];
@@ -85,26 +102,28 @@ function listContainer(doc: Document, chapterAnchors: HTMLAnchorElement[]): Elem
 
 /** 收集一个或多个目录页（按页序）里的章节链接 */
 export function collectToc(docs: Document[], keep?: Filter): TocItem[] {
-  const filter = resolveFilter(docs, keep);
+  const parsed = docs.map((doc) => ({ doc, anchors: docAnchors(doc) }));
+  const filter = resolveFilter(parsed, keep);
   const usable = (url: string) => !!url && filter(url);
-  const all = docs.flatMap((doc) => [...doc.querySelectorAll('a')]);
   // 有的站点列表里最新一章没有地址，真实地址只出现在"最新章节"区块，按同名章节补上
-  const urlByTitle = new Map(
-    all.flatMap((a) => {
-      const title = cleanText(a.textContent);
-      const url = anchorUrl(a);
-      return title && usable(url) ? [[title, url] as const] : [];
-    }),
-  );
+  const urlByTitle = new Map<string, string>();
+  for (const { anchors } of parsed) {
+    for (const { title, url } of anchors) {
+      if (title && usable(url) && !urlByTitle.has(title)) urlByTitle.set(title, url);
+    }
+  }
   const items: TocItem[] = [];
-  for (const doc of docs) {
-    const anchors = [...doc.querySelectorAll('a')];
-    const container = listContainer(doc, anchors.filter((a) => usable(anchorUrl(a))));
+  for (const { doc, anchors } of parsed) {
+    const byEl = new Map(anchors.map((info) => [info.a, info]));
+    const container = listContainer(
+      doc,
+      anchors.filter((info) => usable(info.url)).map((info) => info.a),
+    );
     for (const a of container.querySelectorAll('a')) {
-      const title = cleanText(a.textContent);
-      if (!title) continue;
-      const url = usable(anchorUrl(a)) ? anchorUrl(a) : urlByTitle.get(title);
-      if (url) items.push({ url: url.split('#')[0], title });
+      const info = byEl.get(a);
+      if (!info || !info.title) continue;
+      const url = usable(info.url) ? info.url : urlByTitle.get(info.title);
+      if (url) items.push({ url: url.split('#')[0], title: info.title });
     }
   }
   // 目录页顶部常有"最新章节"区块与正文列表重复，保留最后一次出现的位置（分页时跨页比较）
@@ -114,7 +133,8 @@ export function collectToc(docs: Document[], keep?: Filter): TocItem[] {
 
 /** 目录的后续页：分页下拉框里的全部页，或「下一页」链接 */
 function nextTocPages(doc: Document, host: string, isChapter: Filter, visited: Set<string>): string[] {
-  const candidate = (url: string) => !!url && http(url) && new URL(url).host === host && !isChapter(url) && !visited.has(url.split('#')[0]);
+  const candidate = (url: string) =>
+    !!url && http(url) && new URL(url).host === host && !isChapter(url) && !visited.has(url.split('#')[0]);
   const options = [...doc.querySelectorAll('select option[value]')]
     .map((o) => {
       try {
@@ -132,23 +152,50 @@ function nextTocPages(doc: Document, host: string, isChapter: Filter, visited: S
 /** 从第一页开始翻完目录的所有分页；某页没有新章节即停止，避免误把其它"下一页"当成目录分页 */
 async function loadTocPages(firstUrl: string, firstDoc: Document, keep?: Filter): Promise<TocItem[]> {
   const docs = [firstDoc];
-  const isChapter = resolveFilter(docs, keep);
+  const isChapter = resolveFilter([{ anchors: docAnchors(firstDoc) }], keep);
   const host = new URL(firstUrl).host;
   const visited = new Set([firstUrl.split('#')[0]]);
-  const queue = nextTocPages(firstDoc, host, isChapter, visited);
-  let count = collectToc(docs, isChapter).length;
+  const firstItems = collectToc(docs, isChapter);
+  const seen = new Set(firstItems.map((it) => it.url));
+  const queue: string[] = [];
+  const enqueue = (urls: string[]) => {
+    for (const raw of urls) {
+      const clean = raw.split('#')[0];
+      if (!visited.has(clean) && !queue.includes(clean)) queue.push(clean);
+    }
+  };
+  enqueue(nextTocPages(firstDoc, host, isChapter, visited));
+
   while (queue.length && docs.length < MAX_TOC_PAGES) {
-    const url = queue.shift()!.split('#')[0];
-    if (visited.has(url)) continue;
-    visited.add(url);
-    const doc = await fetchDocument(url);
-    const total = collectToc([...docs, doc], isChapter).length;
-    if (total <= count) break;
-    docs.push(doc);
-    count = total;
-    queue.push(...nextTocPages(doc, host, isChapter, visited).filter((u) => !queue.includes(u)));
+    const remaining = MAX_TOC_PAGES - docs.length;
+    const batch = queue.splice(0, Math.min(TOC_CONCURRENCY, remaining));
+    batch.forEach((u) => visited.add(u));
+    const tasks = batch.map((u) => {
+      const p = fetchDocument(u);
+      p.catch(() => undefined);
+      return p;
+    });
+    let stopped = false;
+    for (const task of tasks) {
+      const doc = await task;
+      const items = collectToc([doc], isChapter);
+      let added = false;
+      for (const it of items) {
+        if (!seen.has(it.url)) {
+          seen.add(it.url);
+          added = true;
+        }
+      }
+      if (!added) {
+        stopped = true;
+        break;
+      }
+      docs.push(doc);
+      enqueue(nextTocPages(doc, host, isChapter, visited));
+    }
+    if (stopped) break;
   }
-  return collectToc(docs, isChapter);
+  return docs.length === 1 ? firstItems : collectToc(docs, isChapter);
 }
 
 function chapterFilter(site: SiteEntry, refChapterUrl?: string): Filter | undefined {
@@ -182,7 +229,12 @@ export async function loadFullToc(site: SiteEntry, chapterUrl: string, tocUrl: s
 /** 从书页获取完整目录：目录接口 → 书页本身的章节列表（含分页） → 书页上的「目录」链接 */
 export async function loadTocFromBookPage(site: SiteEntry, bookUrl: string, bookDoc: Document): Promise<TocItem[]> {
   const filter = chapterFilter(site);
-  const api = tocApiUrl(site, [bookUrl]);
+  let api: string | undefined;
+  try {
+    api = tocApiUrl(site, [bookUrl]);
+  } catch {
+    api = undefined;
+  }
   if (api) return loadTocPages(api, await fetchDocument(api), filter);
   const items = await loadTocPages(bookUrl, bookDoc, filter);
   // 书页只列了最新几章时，去完整目录页

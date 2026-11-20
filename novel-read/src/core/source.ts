@@ -1,4 +1,6 @@
 import { GM_deleteValue, GM_getValue, GM_setValue } from '$';
+import { BOOK_SEARCH } from '../sites/builtin';
+import { hostMatches } from '../storage';
 import type { SiteEntry, TocItem } from '../types';
 import { parseBookInfo } from './book';
 import { cleanText, stripPageMark } from './extract';
@@ -19,7 +21,19 @@ const RATE_LIMIT_TEXT = /间隔时间|过于频繁|搜索太快|太频繁/;
 /** 同一站点相邻两次搜索的最小间隔（杰奇类站点默认要求 5 秒） */
 const SEARCH_INTERVAL = 5500;
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(signal!.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 const SEARCH_LINK_TEXT = /^[\s[【]*(搜索|搜書|搜书|找书|找書|站内搜索)/;
 const MAX_CANDIDATES = 3;
 
@@ -41,6 +55,10 @@ const CN_UNITS: Record<string, number> = { 十: 10, 百: 100, 千: 1000, 万: 10
 
 function cnToNumber(s: string): number {
   if (/^\d+$/.test(s)) return Number(s);
+  if (!/[十百千万]/.test(s)) {
+    const digits = [...s].map((ch) => CN_DIGITS[ch] ?? '').join('');
+    return Number(digits) || 0;
+  }
   let total = 0;
   let section = 0;
   let digit = 0;
@@ -109,6 +127,7 @@ interface SearchSpec {
   body?: string;
   charset: string;
   result?: string;
+  author?: string;
 }
 
 const specKey = (siteId: string) => `searchSpec:${siteId}`;
@@ -137,26 +156,33 @@ function specFromForm(page: FetchedPage): SearchSpec | undefined {
 }
 
 /** 自动识别站点搜索：首页的搜索表单 → 首页「搜索」链接指向的页面里的表单 */
-async function detectSearch(site: SiteEntry): Promise<SearchSpec> {
-  const home = await fetchPage(siteHome(site));
+async function detectSearch(site: SiteEntry, signal?: AbortSignal): Promise<SearchSpec> {
+  const home = await fetchPage(siteHome(site), { signal });
   const fromHome = specFromForm(home);
   if (fromHome) return fromHome;
   const link = [...home.doc.querySelectorAll('a')].find((a) => SEARCH_LINK_TEXT.test(cleanText(a.textContent)) && /^https?:/.test(a.href));
   if (link) {
-    const fromPage = specFromForm(await fetchPage(link.href));
+    const fromPage = specFromForm(await fetchPage(link.href, { signal }));
     if (fromPage) return fromPage;
   }
   throw new Error('没有识别到搜索框，可在站点规则里配置 search');
 }
 
-async function searchSpec(site: SiteEntry): Promise<SearchSpec> {
-  if (site.search) {
-    const charset = site.search.charset ?? (await fetchPage(siteHome(site))).charset;
-    return { url: site.search.url, body: site.search.body, charset, result: site.search.result };
+async function searchSpec(site: SiteEntry, signal?: AbortSignal): Promise<SearchSpec> {
+  const configured = site.search ?? BOOK_SEARCH[site.id]?.search;
+  if (configured) {
+    const charset = configured.charset ?? (await fetchPage(siteHome(site), { signal })).charset;
+    return {
+      url: configured.url,
+      body: configured.body,
+      charset,
+      result: configured.result,
+      author: configured.author,
+    };
   }
   const cached = GM_getValue<SearchSpec | undefined>(specKey(site.id), undefined);
   if (cached) return cached;
-  const spec = await detectSearch(site);
+  const spec = await detectSearch(site, signal);
   GM_setValue(specKey(site.id), spec);
   return spec;
 }
@@ -167,7 +193,10 @@ function fill(template: string, name: string, charset: string): string {
 
 /** 在线搜索页地址（GET 站点可直接打开，POST 站点退回首页），用于「去站内搜索」 */
 export function searchPageUrl(site: SiteEntry, name: string): string {
-  const spec = site.search ?? GM_getValue<SearchSpec | undefined>(specKey(site.id), undefined);
+  if (site.id === 'twkan' && !site.search) {
+    return `https://twkan.com/search/${encodeURIComponent(name)}/1.html`;
+  }
+  const spec = site.search ?? BOOK_SEARCH[site.id]?.search ?? GM_getValue<SearchSpec | undefined>(specKey(site.id), undefined);
   if (!spec || spec.body) return siteHome(site);
   try {
     return fill(spec.url, name, (spec as SearchSpec).charset ?? 'utf-8');
@@ -182,59 +211,137 @@ const searchQueues = new Map<string, Promise<unknown>>();
  * 同一站点的搜索排队执行，相邻两次至少间隔 SEARCH_INTERVAL。
  * 换源会用简体、繁体书名各搜一次，不排队就会撞上杰奇类站点「两次搜索间隔 5 秒」的限制。
  */
-function queued<T>(siteId: string, task: () => Promise<T>): Promise<T> {
+function queued<T>(siteId: string, task: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+  }
   const prev = searchQueues.get(siteId) ?? Promise.resolve();
-  const run = prev.then(task);
+  let ran = false;
+  const run = prev.then(() => {
+    signal?.throwIfAborted();
+    ran = true;
+    return task();
+  });
   searchQueues.set(
     siteId,
     run.then(
-      () => sleep(SEARCH_INTERVAL),
-      () => sleep(SEARCH_INTERVAL),
+      () => (ran ? sleep(SEARCH_INTERVAL) : undefined),
+      () => (ran ? sleep(SEARCH_INTERVAL) : undefined),
     ),
   );
   return run;
 }
 
 /** 搜索书名，返回书名完全相同的书页地址（最多 MAX_CANDIDATES 个）；被限流时等一个间隔再试一次 */
-export function searchBooks(site: SiteEntry, name: string, hans: Convert): Promise<string[]> {
-  return queued(site.id, async () => {
-    try {
-      return await searchOnce(site, name, hans);
-    } catch (e) {
-      if (!(e instanceof RateLimitError)) throw e;
-      await sleep(SEARCH_INTERVAL);
-      return searchOnce(site, name, hans);
-    }
-  });
+export function searchBooks(site: SiteEntry, name: string, hans: Convert, signal?: AbortSignal): Promise<string[]> {
+  return queued(
+    site.id,
+    async () => {
+      try {
+        return await searchOnce(site, name, hans, signal);
+      } catch (e) {
+        if (!(e instanceof RateLimitError)) throw e;
+        signal?.throwIfAborted();
+        await sleep(SEARCH_INTERVAL, signal);
+        return searchOnce(site, name, hans, signal);
+      }
+    },
+    signal,
+  );
 }
 
-async function searchOnce(site: SiteEntry, name: string, hans: Convert): Promise<string[]> {
-  const spec = await searchSpec(site);
-  const url = fill(spec.url, name, spec.charset);
-  let page: FetchedPage;
-  try {
-    page = await fetchPage(url, spec.body ? { method: 'POST', body: fill(spec.body, name, spec.charset) } : {});
-  } catch (e) {
-    // 自动识别的搜索地址失效时下次重新识别
-    if (!site.search) GM_deleteValue(specKey(site.id));
-    throw e;
-  }
+async function searchOnce(site: SiteEntry, name: string, hans: Convert, signal?: AbortSignal): Promise<string[]> {
+  const { spec, page, url } = await fetchSearch(site, name, signal);
   const target = nameKey(name, hans);
-  const scope = spec.result ? [...page.doc.querySelectorAll(spec.result)] : [page.doc.body];
-  const anchors = scope.flatMap((el) => (el instanceof HTMLAnchorElement ? [el] : [...el.querySelectorAll('a')]));
   const hits = [
     ...new Set(
-      anchors
+      resultAnchors(page, spec)
         .filter((a) => /^https?:/.test(a.href) && nameKey(cleanText(a.textContent), hans) === target)
         .map((a) => a.href.split('#')[0]),
     ),
   ];
   if (hits.length) return hits.slice(0, MAX_CANDIDATES);
-  // 只有一个结果时很多站点直接重定向到书页
-  const searchPath = new URL(url).pathname;
-  if (new URL(page.url).pathname !== searchPath) return [page.url.split('#')[0]];
+  // 只有一个结果时很多站点直接重定向到书页；排除 /search/<词>/1.html 这类搜索结果页
+  const searchPath = new URL(url).pathname.replace(/\/$/, '');
+  const finalPath = new URL(page.url).pathname;
+  const bookPath = BOOK_SEARCH[site.id]?.bookPath ?? (site.search?.bookPath ? new RegExp(site.search.bookPath) : undefined);
+  const isBookRedirect = bookPath
+    ? bookPath.test(finalPath)
+    : finalPath !== searchPath && !finalPath.startsWith(`${searchPath}/`);
+  if (isBookRedirect) return [page.url.split('#')[0]];
   if (RATE_LIMIT_TEXT.test(page.doc.body?.textContent ?? '')) throw new RateLimitError();
   return [];
+}
+
+async function fetchSearch(site: SiteEntry, name: string, signal?: AbortSignal) {
+  const spec = await searchSpec(site, signal);
+  const url = fill(spec.url, name, spec.charset);
+  try {
+    const page = await fetchPage(url, spec.body ? { method: 'POST', body: fill(spec.body, name, spec.charset), signal } : { signal });
+    return { spec, page, url };
+  } catch (e) {
+    // 自动识别的搜索地址失效时下次重新识别（取消请求除外）
+    if (!site.search && !signal?.aborted) GM_deleteValue(specKey(site.id));
+    throw e;
+  }
+}
+
+function resultAnchors(page: FetchedPage, spec: SearchSpec): HTMLAnchorElement[] {
+  const scope = spec.result ? [...page.doc.querySelectorAll(spec.result)] : [page.doc.body];
+  return scope.flatMap((el) => (el instanceof HTMLAnchorElement ? [el] : [...el.querySelectorAll('a')]));
+}
+
+export interface BookSearchHit {
+  name: string;
+  bookUrl: string;
+  author?: string;
+}
+
+/** 搜书只返回书页，不为每条结果抓完整目录。与换源共享站点搜索间隔。 */
+export function findBooks(
+  site: SiteEntry,
+  keyword: string,
+  bookPath: RegExp,
+  hans: Convert,
+  signal: AbortSignal,
+): Promise<BookSearchHit[]> {
+  return queued(
+    site.id,
+    async () => {
+      signal.throwIfAborted();
+      const target = nameKey(keyword, hans);
+      if (!target) return [];
+      const { spec, page } = await fetchSearch(site, keyword, signal);
+      const asBookUrl = (href: string) => {
+        const u = new URL(href);
+        if (u.protocol !== 'https:' && u.protocol !== 'http:') return;
+        if (!site.hosts.some((host) => hostMatches(u.hostname, host))) return;
+        if (!bookPath.test(u.pathname)) return;
+        u.hash = '';
+        return u.href;
+      };
+      const bookUrl = asBookUrl(page.url);
+      if (bookUrl) {
+        const book = parseBookInfo(page.doc, site);
+        return nameKey(book.name, hans).includes(target) ? [{ ...book, bookUrl }] : [];
+      }
+      if (RATE_LIMIT_TEXT.test(page.doc.body?.textContent ?? '')) throw new RateLimitError();
+      const authorSel = spec.author ?? BOOK_SEARCH[site.id]?.search.author;
+      const hits = new Map<string, BookSearchHit>();
+      for (const a of resultAnchors(page, spec)) {
+        if (!/^https?:/.test(a.href)) continue;
+        const hitUrl = asBookUrl(a.href);
+        const name = cleanText(a.querySelector('h3')?.textContent ?? a.textContent);
+        if (hitUrl && nameKey(name, hans).includes(target) && !hits.has(hitUrl)) {
+          const row = authorSel ? a.closest('li, tr, .bookbox, .result-item, div') : null;
+          const rawAuthor = authorSel && row ? cleanText(row.querySelector(authorSel)?.textContent).replace(/^作者[:：]\s*/, '') : '';
+          hits.set(hitUrl, rawAuthor ? { name, bookUrl: hitUrl, author: rawAuthor } : { name, bookUrl: hitUrl });
+        }
+      }
+      return [...hits.values()].slice(0, 20);
+    },
+    signal,
+  );
 }
 
 export interface BookSource {
@@ -245,8 +352,8 @@ export interface BookSource {
 }
 
 /** 读取对方书页：书名、作者、完整目录 */
-export async function inspectBook(site: SiteEntry, bookUrl: string): Promise<BookSource> {
-  const page = await fetchPage(bookUrl);
+export async function inspectBook(site: SiteEntry, bookUrl: string, signal?: AbortSignal): Promise<BookSource> {
+  const page = await fetchPage(bookUrl, { signal });
   const info = parseBookInfo(page.doc, site);
   const toc = await loadTocFromBookPage(site, page.url, page.doc);
   return { bookUrl: page.url.split('#')[0], name: info.name, author: info.author, toc };

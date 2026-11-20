@@ -1,4 +1,47 @@
-import type { SiteEntry } from '../types';
+import type { SearchConfig, SiteEntry } from '../types';
+
+/** 搜书面板用书页地址排除章节、分类等链接；站点自定义 search 优先。 */
+export const BOOK_SEARCH: Record<string, {
+  bookPath: RegExp;
+  chapterRoot: string;
+  startDirectory?: string;
+  script: 'hans' | 'hant';
+  search: SearchConfig;
+}> = {
+  twkan: {
+    bookPath: /^\/book\/(\d+)\.html$/,
+    chapterRoot: '/txt/',
+    startDirectory: '/book/{id}/index.html',
+    script: 'hant',
+    search: {
+      url: 'https://twkan.com/search',
+      body: 'searchkey={name}&searchtype=all',
+      charset: 'utf-8',
+      result: '#article_list_content h3 a, .newbox h3 a',
+      author: '.newnav .labelbox label:first-child',
+    },
+  },
+  deqixss: {
+    bookPath: /^\/books\/(\d+)\/?$/,
+    chapterRoot: '/books/',
+    script: 'hans',
+    search: {
+      url: 'https://www.deqixss.com/modules/article/search.php',
+      body: 'searchkey={name}&action=login&searchtype=all',
+      charset: 'utf-8',
+    },
+  },
+  sudugu: {
+    bookPath: /^\/(\d+)\/$/,
+    chapterRoot: '/',
+    script: 'hans',
+    search: {
+      url: 'https://www.sudugu.cc/modules/article/search.php',
+      body: 'searchkey={name}&searchtype=articlename',
+      charset: 'utf-8',
+    },
+  },
+};
 
 export const BUILTIN_SITES: SiteEntry[] = [
   {
@@ -15,7 +58,7 @@ export const BUILTIN_SITES: SiteEntry[] = [
     tocLink: { selector: '.page1' },
     toc: {
       api: 'https://twkan.com/ajax_novels/chapterlist/{bookId}.html',
-      bookIdPattern: '/txt/(\\d+)/',
+      bookIdPattern: '/(?:txt|book)/(\\d+)',
     },
     remove: ['.txtad', '.txtcenter', 'script', 'style'],
     // 匹配前会把花体字母（𝕥𝕨𝕜𝕒𝕟、🆃🆆🅺🅰🅽 等）还原成 ASCII

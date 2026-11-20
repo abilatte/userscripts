@@ -1,14 +1,20 @@
 import type { RefObject } from 'preact';
 import { useEffect, useRef } from 'preact/hooks';
 
+export type KeyPanel = 'toc' | 'source' | 'shelf' | 'search' | 'excerpts' | 'settings';
+
 export interface ReaderKeyHandlers {
   /** 是否为章节翻页模式：左右方向键只在这个模式下翻章 */
   chapterMode: boolean;
+  hasSelection?: boolean;
+  onClearSelection?(): void;
   /** Esc：关闭面板或退出阅读模式 */
   onEscape(): void;
   onNext(): void;
   onPrev(): void;
-  onTogglePanel(panel: 'toc' | 'source'): void;
+  onTogglePanel(panel: KeyPanel): void;
+  onToggleDark?(): void;
+  onFontSize?(delta: number): void;
 }
 
 /** 阅读器键盘操作；在捕获阶段拦截全部按键事件，避免触发站点自身的快捷键 */
@@ -27,6 +33,7 @@ export function useReaderKeys(scrollRef: RefObject<HTMLElement>, handlers: Reade
       if (e.key === 'Escape') {
         e.preventDefault();
         if (typing) origin!.blur();
+        else if (h.hasSelection) h.onClearSelection?.();
         else h.onEscape();
         return;
       }
@@ -67,6 +74,12 @@ export function useReaderKeys(scrollRef: RefObject<HTMLElement>, handlers: Reade
             h.onPrev();
           }
           return;
+        case ']':
+          e.preventDefault();
+          return h.onNext();
+        case '[':
+          e.preventDefault();
+          return h.onPrev();
         case 't':
         case 'T':
           e.preventDefault();
@@ -75,6 +88,31 @@ export function useReaderKeys(scrollRef: RefObject<HTMLElement>, handlers: Reade
         case 'S':
           e.preventDefault();
           return h.onTogglePanel('source');
+        case 'b':
+        case 'B':
+          e.preventDefault();
+          return h.onTogglePanel('shelf');
+        case 'f':
+        case 'F':
+        case '/':
+          e.preventDefault();
+          return h.onTogglePanel('search');
+        case 'e':
+        case 'E':
+          e.preventDefault();
+          return h.onTogglePanel('excerpts');
+        case 'd':
+        case 'D':
+          e.preventDefault();
+          return h.onToggleDark?.();
+        case '-':
+        case '_':
+          e.preventDefault();
+          return h.onFontSize?.(-2);
+        case '=':
+        case '+':
+          e.preventDefault();
+          return h.onFontSize?.(2);
       }
     };
     const types = ['keydown', 'keyup', 'keypress'] as const;

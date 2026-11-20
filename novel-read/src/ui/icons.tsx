@@ -149,6 +149,13 @@ export const IconExternal = (p: IconProps) => (
   </Svg>
 );
 
+export const IconSearch = (p: IconProps) => (
+  <Svg {...p}>
+    <circle cx="10.5" cy="10.5" r="5.5" />
+    <path d="m14.5 14.5 4.5 4.5" />
+  </Svg>
+);
+
 export const IconDownload = (p: IconProps) => (
   <Svg {...p}>
     <path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19.5h14" />

@@ -1,16 +1,17 @@
 import { useEffect, useMemo, useState } from 'preact/hooks';
 import { cleanText, detectContent, extractChapter, findLink, NEXT_TEXT, TOC_TEXT } from '../core/extract';
 import { buildSelector } from '../core/selector';
-import type { Chapter, SiteEntry } from '../types';
+import type { Chapter, LinkLocator, SiteEntry } from '../types';
 import { IconClose } from './icons';
 
-type StepId = 'content' | 'next' | 'title' | 'toc';
+type StepId = 'content' | 'next' | 'title' | 'toc' | 'remove';
 
-const STEPS: { id: StepId; title: string; desc: string; optional?: boolean; link?: boolean }[] = [
+const STEPS: { id: StepId; title: string; desc: string; optional?: boolean; link?: boolean; multi?: boolean }[] = [
   { id: 'content', title: '点选正文区域', desc: '在页面上点击小说正文所在的区域；选小了可以点「扩大范围」。' },
   { id: 'next', title: '点选「下一章」链接', desc: '点击页面上的下一章按钮（不会跳转）。', link: true },
   { id: 'title', title: '点选章节标题（可跳过）', desc: '不选则自动使用页面的 h1 或网页标题。', optional: true },
   { id: 'toc', title: '点选「目录」链接（可跳过）', desc: '用于在没有目录接口时获取全部章节。', optional: true, link: true },
+  { id: 'remove', title: '点选要移除的广告块（可跳过）', desc: '在正文里点选要移除的广告/干扰元素，可连选多个。', optional: true, multi: true },
 ];
 
 export interface PickerProps {
@@ -56,11 +57,12 @@ function describe(el: Element): string {
 export function Picker({ site, onSave, onCancel }: PickerProps) {
   const [step, setStep] = useState(0);
   const [hover, setHover] = useState<Element>();
-  const [picked, setPicked] = useState<Partial<Record<StepId, Element>>>(() => ({
+  const [picked, setPicked] = useState<Partial<Record<Exclude<StepId, 'remove'>, Element>>>(() => ({
     content: detectContent(document),
     next: findLink(document, undefined, NEXT_TEXT),
     toc: findLink(document, undefined, TOC_TEXT),
   }));
+  const [removeEls, setRemoveEls] = useState<Element[]>([]);
   const [error, setError] = useState<string>();
 
   const current = STEPS[step];
@@ -84,7 +86,11 @@ export function Picker({ site, onSave, onCancel }: PickerProps) {
       const el = target(e);
       if (!el) return setError('请点击一个链接');
       setError(undefined);
-      setPicked((p) => ({ ...p, [current.id]: el }));
+      if (current.id === 'remove') {
+        setRemoveEls((prev) => (prev.includes(el) ? prev.filter((x) => x !== el) : [...prev, el]));
+      } else {
+        setPicked((p) => ({ ...p, [current.id]: el }));
+      }
     };
     // 阻止站点在按下时触发跳转或其它脚本
     const block = (e: Event) => {
@@ -109,31 +115,58 @@ export function Picker({ site, onSave, onCancel }: PickerProps) {
       const { content, next, title, toc } = picked;
       if (!content) throw new Error('还没有选择正文区域');
       if (!next) throw new Error('还没有选择下一章链接');
+      const linkLocator = (el?: Element): LinkLocator | undefined => {
+        if (!el) return undefined;
+        const text = cleanText(el.textContent);
+        const dup = text ? [...document.querySelectorAll('a')].filter((a) => cleanText(a.textContent) === text).length > 1 : false;
+        let selector: string | undefined;
+        if (!text || dup) {
+          try {
+            selector = buildSelector(el);
+          } catch (e) {
+            if (!text) throw e;
+          }
+        }
+        return { ...(text ? { text } : {}), ...(selector ? { selector } : {}) };
+      };
+      const removeSelectors = removeEls.flatMap((el) => {
+        try {
+          return [buildSelector(el)];
+        } catch {
+          return [];
+        }
+      });
       const entry: SiteEntry = {
         ...site,
+        adapter: undefined,
+        freshFirst: undefined,
         chapterPattern: undefined,
         content: buildSelector(content),
         title: title ? buildSelector(title) : undefined,
-        next: { text: cleanText(next.textContent) },
+        next: linkLocator(next),
         prev: undefined,
-        tocLink: toc ? { text: cleanText(toc.textContent) } : undefined,
+        tocLink: linkLocator(toc),
+        remove: removeSelectors.length ? [...new Set([...(site.remove ?? []), ...removeSelectors])] : site.remove,
       };
       return { entry, chapter: extractChapter(document, entry, location.href) };
     } catch (e) {
       return { error: (e as Error).message };
     }
-  }, [previewing, picked, site]);
+  }, [previewing, picked, removeEls, site]);
 
-  const chosen = picked[current?.id];
+  const chosen = current && current.id !== 'remove' ? picked[current.id] : undefined;
   const expand = () => {
     const parent = chosen?.parentElement;
-    if (parent && parent !== document.body) setPicked((p) => ({ ...p, [current.id]: parent }));
+    if (parent && parent !== document.body && current.id !== 'remove') {
+      setPicked((p) => ({ ...p, [current.id]: parent }));
+    }
   };
 
   return (
     <div class="nr-ui" data-theme="white">
       {!previewing && hover && hover !== chosen && <Box el={hover} kind="hover" />}
       {!previewing && chosen && <Box el={chosen} kind="chosen" tag={current.title.replace(/^点选|（可跳过）$/g, '')} />}
+      {!previewing && current.id === 'remove' && removeEls.map((el, i) => <Box key={i} el={el} kind="chosen" tag={`移除 ${i + 1}`} />)}
       <div class="nr-pick-bar">
         <div class="nr-pick-steps">
           {[...STEPS, { id: 'preview' }].map((s, i) => (
@@ -154,7 +187,22 @@ export function Picker({ site, onSave, onCancel }: PickerProps) {
 
         {!previewing && (
           <div class="nr-pick-current">
-            {chosen ? (
+            {current.id === 'remove' ? (
+              removeEls.length ? (
+                <div class="nr-strips" style="margin-top:0">
+                  {removeEls.map((el, i) => (
+                    <span key={i} class="nr-strip">
+                      <span>{describe(el)}</span>
+                      <button title="移除" onClick={() => setRemoveEls((prev) => prev.filter((x) => x !== el))}>
+                        <IconClose width={12} height={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                '尚未选择要移除的广告块'
+              )
+            ) : chosen ? (
               <>
                 已选：<code>{describe(chosen)}</code>
                 {current.id === 'content' && `（约 ${cleanText(chosen.textContent).length} 字）`}
@@ -207,7 +255,8 @@ export function Picker({ site, onSave, onCancel }: PickerProps) {
             <button
               class="nr-btn"
               onClick={() => {
-                setPicked((p) => ({ ...p, [current.id]: undefined }));
+                if (current.id === 'remove') setRemoveEls([]);
+                else setPicked((p) => ({ ...p, [current.id]: undefined }));
                 setStep(step + 1);
               }}
             >
@@ -215,7 +264,7 @@ export function Picker({ site, onSave, onCancel }: PickerProps) {
             </button>
           )}
           {!previewing ? (
-            <button class="nr-btn is-primary" disabled={!chosen} onClick={() => setStep(step + 1)}>
+            <button class="nr-btn is-primary" disabled={!current.optional && !chosen} onClick={() => setStep(step + 1)}>
               下一步
             </button>
           ) : (

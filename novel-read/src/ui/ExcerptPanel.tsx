@@ -49,14 +49,15 @@ export function ExcerptPanel({ bookKey, onClose, showToast }: Props) {
   };
 
   const remove = (ids: Set<string>) => {
-    const next = all.filter((e) => !ids.has(e.id));
+    const latest = loadExcerpts();
+    const next = latest.filter((e) => !ids.has(e.id));
     saveExcerpts(next);
     setAll(next);
     setChecked((prev) => new Set([...prev].filter((id) => !ids.has(id))));
   };
 
   return (
-    <section class="nr-panel is-toc">
+    <section class="nr-panel is-toc" role="dialog" aria-label="摘录">
       <div class="nr-panel-head">
         <h2>摘录</h2>
         <button class="nr-btn is-ghost nr-icon-btn" onClick={onClose} title="关闭">

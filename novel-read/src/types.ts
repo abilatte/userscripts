@@ -13,6 +13,13 @@ export interface TocConfig {
   bookIdPattern?: string;
 }
 
+export interface ReplaceRule {
+  /** 查找内容（正则表达式字符串） */
+  from: string;
+  /** 替换为的字符串 */
+  to: string;
+}
+
 export interface SearchConfig {
   /** 搜索地址，{name} 为书名占位，例如 https://x.com/search.php?searchkey={name} */
   url: string;
@@ -22,6 +29,16 @@ export interface SearchConfig {
   charset?: string;
   /** 结果列表里书页链接的选择器；为空时取文字与书名相同的链接 */
   result?: string;
+  /** 搜索结果项中作者的选择器 */
+  author?: string;
+  /** 书页 URL（pathname）正则，用于在搜书结果中识别书页链接 */
+  bookPath?: string;
+  /** 章节 URL 路径前缀（搜书定位首章用） */
+  chapterRoot?: string;
+  /** 正序目录页路径模板，支持 {id} */
+  startDirectory?: string;
+  /** 站点检索惯用字形 */
+  script?: 'hans' | 'hant';
 }
 
 /** 站点条目：白名单 + 适配规则 */
@@ -54,6 +71,8 @@ export interface SiteEntry {
   filters?: string[];
   /** 划选加入的过滤文字：只删除这段文字本身，删完为空的段落整段去掉 */
   strip?: string[];
+  /** 正文替换规则（按正则全局替换，用于错字纠错或和谐词还原） */
+  replace?: ReplaceRule[];
   /** 第一章是否重新请求原始 HTML（站点在前端改写了正文时使用） */
   freshFirst?: boolean;
   /** 内置代码适配器 id：正文需要接口/解密等规则无法表达的站点，由适配器负责加载章节 */
@@ -123,11 +142,21 @@ export type ScriptMode = 'raw' | 'hans' | 'hant';
 export interface Settings {
   theme: ThemeId;
   font: FontId;
+  /** 自定义正文字体名称（优先于预设字体栈） */
+  customFont: string;
   fontSize: number;
   /** 0 表示自动 */
   width: number;
   lineHeight: number;
   paragraphSpacing: number;
+  /** 段首缩进两格 */
+  indent: boolean;
+  /** 正文两端对齐 */
+  justify: boolean;
+  /** 自动合并句中异常断段 */
+  mergeParagraphs: boolean;
+  /** 显示底部阅读信息栏（当前章、目录进度、时间） */
+  statusBar: boolean;
   pageMode: PageMode;
   script: ScriptMode;
 }

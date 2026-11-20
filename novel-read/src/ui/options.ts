@@ -40,12 +40,16 @@ export const SCRIPT_MODES: { id: ScriptMode; name: string }[] = [
 /** 阅读器根节点上的 CSS 变量 */
 export function readerVars(s: Settings): string {
   const font = FONTS.find((f) => f.id === s.font) ?? FONTS[0];
+  const custom = s.customFont?.trim();
+  const fontStack = custom ? `'${custom.replace(/['\\]/g, '')}', ${font.stack}` : font.stack;
   const pw = s.width ? `min(${s.width}px, calc(100vw - 180px))` : 'min(1600px, calc(100vw - 180px))';
   return [
     `--pw:${pw}`,
     `--fs:${s.fontSize}px`,
     `--lh:${s.lineHeight}`,
     `--ps:${s.paragraphSpacing}em`,
-    `--read-font:${font.stack}`,
+    `--indent:${s.indent === false ? '0' : '2em'}`,
+    `--align:${s.justify === false ? 'left' : 'justify'}`,
+    `--read-font:${fontStack}`,
   ].join(';');
 }

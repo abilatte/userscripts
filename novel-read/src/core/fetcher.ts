@@ -34,6 +34,9 @@ export interface RequestOptions {
   method?: 'GET' | 'POST';
   /** application/x-www-form-urlencoded 请求体 */
   body?: string;
+  headers?: Record<string, string>;
+  referrer?: string;
+  signal?: AbortSignal;
 }
 
 function looksLikeChallenge(res: ResponseLike, body: string): boolean {
@@ -67,15 +70,41 @@ function parseHeaders(raw: string): Headers {
 
 /** 跨站请求走 GM_xmlhttpRequest（需要 @connect），会带上目标站点的 Cookie */
 function crossOrigin(url: string, opts: RequestOptions): Promise<HttpResponse> {
+  if (opts.signal?.aborted) {
+    return Promise.reject(opts.signal.reason ?? new DOMException('Aborted', 'AbortError'));
+  }
   return new Promise((resolve, reject) => {
-    GM_xmlhttpRequest({
+    const mergedHeaders = {
+      ...(opts.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
+      ...(opts.referrer ? { Referer: opts.referrer } : {}),
+      ...(opts.headers ?? {}),
+    };
+    const headers = Object.keys(mergedHeaders).length ? mergedHeaders : undefined;
+    let settled = false;
+    let task: { abort?: () => void } | void;
+    const cleanup = () => opts.signal?.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        task?.abort?.();
+      } catch {
+        // 忽略部分脚本管理器在已结束请求上调用 abort 抛出的异常
+      }
+      reject(opts.signal!.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    task = GM_xmlhttpRequest({
       url,
       method: opts.method ?? 'GET',
       data: opts.body,
-      headers: opts.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : undefined,
+      headers,
       responseType: 'arraybuffer',
       timeout: REQUEST_TIMEOUT,
       onload: (r) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         const buf = r.response as ArrayBuffer;
         resolve({
           ok: r.status >= 200 && r.status < 300,
@@ -87,25 +116,67 @@ function crossOrigin(url: string, opts: RequestOptions): Promise<HttpResponse> {
           text: async () => new TextDecoder().decode(buf),
         });
       },
-      onerror: () => reject(new Error(`网络请求失败：${new URL(url).host}（如果 Tampermonkey 弹出跨域确认，请选择允许）`)),
-      ontimeout: () => reject(new Error(`请求超时：${new URL(url).host}`)),
+      onerror: () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`网络请求失败：${new URL(url).host}（如果 Tampermonkey 弹出跨域确认，请选择允许）`));
+      },
+      ontimeout: () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(`请求超时：${new URL(url).host}`));
+      },
     });
   });
 }
 
+function withTimeout(signal?: AbortSignal): { signal: AbortSignal; cleanup(): void } {
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT);
+  if (!signal) return { signal: timeout, cleanup: () => {} };
+  if (typeof AbortSignal.any === 'function') {
+    return { signal: AbortSignal.any([signal, timeout]), cleanup: () => {} };
+  }
+  const ac = new AbortController();
+  const onExt = () => ac.abort(signal.reason);
+  const onTimeout = () => ac.abort(timeout.reason);
+  if (signal.aborted) ac.abort(signal.reason);
+  else {
+    signal.addEventListener('abort', onExt, { once: true });
+    timeout.addEventListener('abort', onTimeout, { once: true });
+  }
+  return {
+    signal: ac.signal,
+    cleanup: () => {
+      signal.removeEventListener('abort', onExt);
+      timeout.removeEventListener('abort', onTimeout);
+    },
+  };
+}
+
 export async function request(url: string, opts: RequestOptions = {}): Promise<HttpResponse> {
   if (new URL(url, location.href).origin !== location.origin) return crossOrigin(url, opts);
+  const mergedHeaders = {
+    ...(opts.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
+    ...(opts.headers ?? {}),
+  };
+  const { signal, cleanup } = withTimeout(opts.signal);
   try {
     return await fetch(url, {
       credentials: 'include',
       method: opts.method ?? 'GET',
       body: opts.body,
-      headers: opts.body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : undefined,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT),
+      headers: Object.keys(mergedHeaders).length ? mergedHeaders : undefined,
+      referrer: opts.referrer,
+      signal,
     });
   } catch (e) {
+    if (opts.signal?.aborted || (e as Error).name === 'AbortError') throw e;
     if ((e as Error).name === 'TimeoutError') throw new Error(`请求超时：${new URL(url, location.href).host}`);
     throw new Error(`网络请求失败：${(e as Error).message}`);
+  } finally {
+    cleanup();
   }
 }
 
@@ -139,11 +210,11 @@ export async function fetchPage(url: string, opts: RequestOptions = {}): Promise
   return { doc, url: finalUrl, charset, html };
 }
 
-export async function fetchDocument(url: string): Promise<Document> {
-  return (await fetchPage(url)).doc;
+export async function fetchDocument(url: string, opts?: RequestOptions): Promise<Document> {
+  return (await fetchPage(url, opts)).doc;
 }
 
-function detectCharset(contentType: string | null, buf: ArrayBuffer): string {
+export function detectCharset(contentType: string | null, buf: ArrayBuffer): string {
   const fromHeader = contentType?.match(/charset=["']?([\w-]+)/i)?.[1];
   if (fromHeader) return fromHeader.toLowerCase();
   const head = new TextDecoder('latin1').decode(buf.slice(0, 4096));
@@ -156,17 +227,28 @@ let gbkTable: Map<string, string> | undefined;
 /** 按页面编码对表单值做百分号编码：GBK 站点的搜索词必须用 GBK 编码 */
 export function encodeFormValue(value: string, charset: string): string {
   if (!/^(gbk|gb2312|gb18030)$/i.test(charset)) return encodeURIComponent(value);
-  // 浏览器没有 GBK 编码器，用解码器反查一次建表
+  // 浏览器没有 GBK 编码器，用单次批量解码反查建表
   if (!gbkTable) {
     gbkTable = new Map();
-    const dec = new TextDecoder('gbk');
+    const total = (0xfe - 0x81 + 1) * (0xfe - 0x40);
+    const buf = new Uint8Array(total * 3);
+    const pairs: [number, number][] = [];
+    let offset = 0;
     for (let hi = 0x81; hi <= 0xfe; hi++) {
       for (let lo = 0x40; lo <= 0xfe; lo++) {
         if (lo === 0x7f) continue;
-        const ch = dec.decode(new Uint8Array([hi, lo]));
-        if (ch.length === 1 && ch !== '�' && !gbkTable.has(ch)) {
-          gbkTable.set(ch, `%${hi.toString(16).toUpperCase()}%${lo.toString(16).toUpperCase().padStart(2, '0')}`);
-        }
+        buf[offset++] = hi;
+        buf[offset++] = lo;
+        buf[offset++] = 0x0a;
+        pairs.push([hi, lo]);
+      }
+    }
+    const chars = new TextDecoder('gbk').decode(buf).split('\n');
+    for (let i = 0; i < pairs.length; i++) {
+      const ch = chars[i];
+      if (ch && ch.length === 1 && ch !== '\uFFFD' && !gbkTable.has(ch)) {
+        const [hi, lo] = pairs[i];
+        gbkTable.set(ch, `%${hi.toString(16).toUpperCase()}%${lo.toString(16).toUpperCase().padStart(2, '0')}`);
       }
     }
   }

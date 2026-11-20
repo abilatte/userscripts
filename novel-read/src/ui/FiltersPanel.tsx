@@ -1,7 +1,7 @@
 import { useState } from 'preact/hooks';
 import { COMMON_FILTERS } from '../core/extract';
 import { BUILTIN_SITES } from '../sites/builtin';
-import { loadSites, updateSiteFilters, updateSiteStrip } from '../storage';
+import { loadSites, updateSiteFilters, updateSiteReplace, updateSiteStrip } from '../storage';
 import type { SiteEntry } from '../types';
 import { IconClose } from './icons';
 
@@ -37,6 +37,36 @@ function AddForm({ placeholder, onAdd }: { placeholder: string; onAdd(value: str
   );
 }
 
+function ReplaceForm({ onAdd }: { onAdd(from: string, to: string): string | undefined }) {
+  const [from, setFrom] = useState('');
+  const [to, setTo] = useState('');
+  const [error, setError] = useState<string>();
+  return (
+    <>
+      <form
+        class="nr-add-row"
+        style="margin:8px 0 0"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const err = onAdd(from.trim(), to);
+          setError(err);
+          if (!err) {
+            setFrom('');
+            setTo('');
+          }
+        }}
+      >
+        <input class="nr-input" placeholder="查找正则或文字，例如 什幺" value={from} onInput={(e) => setFrom(e.currentTarget.value)} />
+        <input class="nr-input" placeholder="替换为（可留空）" value={to} onInput={(e) => setTo(e.currentTarget.value)} />
+        <button type="submit" class="nr-btn" disabled={!from.trim()}>
+          添加
+        </button>
+      </form>
+      {error && <div class="nr-error">{error}</div>}
+    </>
+  );
+}
+
 export function FiltersPanel({ site, onSiteChange, showToast }: Props) {
   const [entry, setEntry] = useState(() => loadSites().find((s) => s.id === site.id));
   const builtinFilters = BUILTIN_SITES.find((b) => b.id === site.id)?.filters ?? [];
@@ -62,6 +92,18 @@ export function FiltersPanel({ site, onSiteChange, showToast }: Props) {
     if (entry?.strip?.includes(text)) return '这段文字已在列表中';
     apply(updateSiteStrip(site.id, (list) => [...list, text]));
     showToast('已添加过滤文字');
+    return undefined;
+  };
+
+  const addReplace = (from: string, to: string) => {
+    try {
+      new RegExp(from, 'g');
+    } catch {
+      return `不是合法的正则表达式：${from}`;
+    }
+    if (entry?.replace?.some((r) => r.from === from)) return '这条替换规则已存在';
+    apply(updateSiteReplace(site.id, (list) => [...list, { from, to }]));
+    showToast('已添加替换规则');
     return undefined;
   };
 
@@ -137,6 +179,33 @@ export function FiltersPanel({ site, onSiteChange, showToast }: Props) {
               <div class="nr-hint nr-filter-empty">暂无</div>
             )}
             <AddForm placeholder="要删除的文字" onAdd={addStrip} />
+          </section>
+
+          <section class="nr-filter-section">
+            <div class="nr-filter-title">
+              正文替换<span class="nr-chip">{entry.name}</span>
+            </div>
+            <p class="nr-hint">按正则表达式全局替换显示正文中的错别字或替代词，改动立即生效。</p>
+            {entry.replace?.length ? (
+              <ul class="nr-filter-list">
+                {entry.replace.map((r) => (
+                  <li key={r.from}>
+                    <code>{r.from}</code>
+                    <span class="nr-hint" style="text-align:left">→ {r.to || '（删除）'}</span>
+                    <button
+                      class="nr-btn is-ghost nr-icon-btn nr-filter-del"
+                      title="删除"
+                      onClick={() => apply(updateSiteReplace(site.id, (list) => list.filter((x) => x.from !== r.from)))}
+                    >
+                      <IconClose width={14} height={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div class="nr-hint nr-filter-empty">暂无</div>
+            )}
+            <ReplaceForm onAdd={addReplace} />
           </section>
         </>
       )}

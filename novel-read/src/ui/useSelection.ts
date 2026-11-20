@@ -6,6 +6,7 @@ export interface SelectionInfo {
   chapterUrl: string;
   x: number;
   y: number;
+  below?: boolean;
 }
 
 /** 读取阅读器 Shadow DOM 内的选区（优先用标准的 getComposedRanges） */
@@ -47,11 +48,15 @@ export function useSelection(scrollRef: RefObject<HTMLElement>): [SelectionInfo 
         const chapterEl = startEl?.closest<HTMLElement>('.nr-chapter');
         if (!picked || !text || !chapterEl || !el.contains(chapterEl)) return setSelection(undefined);
         const rect = picked.range.getBoundingClientRect();
+        const x = Math.max(76, Math.min(window.innerWidth - 76, rect.left + rect.width / 2));
+        const below = rect.top < 56;
+        const y = below ? rect.bottom : rect.top;
         setSelection({
           text,
           chapterUrl: chapterEl.dataset.url!,
-          x: rect.left + rect.width / 2,
-          y: rect.top,
+          x,
+          y,
+          below,
         });
       }, 150);
     };
@@ -65,14 +70,18 @@ export function useSelection(scrollRef: RefObject<HTMLElement>): [SelectionInfo 
       dragging = false;
       update();
     };
+    const onScroll = () => setSelection((prev) => (prev ? undefined : prev));
+    const scrollEl = scrollRef.current;
     document.addEventListener('selectionchange', update);
     window.addEventListener('pointerdown', onDown, true);
     window.addEventListener('pointerup', onUp, true);
+    scrollEl?.addEventListener('scroll', onScroll, { passive: true });
     return () => {
       window.clearTimeout(timer);
       document.removeEventListener('selectionchange', update);
       window.removeEventListener('pointerdown', onDown, true);
       window.removeEventListener('pointerup', onUp, true);
+      scrollEl?.removeEventListener('scroll', onScroll);
     };
   }, [scrollRef]);
 

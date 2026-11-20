@@ -111,11 +111,15 @@
   position: fixed;
   top: 0;
   left: 0;
+  width: 100%;
   height: 2px;
   background: var(--accent);
   z-index: 3;
-  transition: width 0.15s linear;
+  transform-origin: left;
+  transform: scaleX(0);
+  transition: transform 0.15s linear;
   opacity: 0.85;
+  pointer-events: none;
 }
 
 .nr-scroll {
@@ -161,8 +165,8 @@
 }
 .nr-chapter p {
   margin: 0 0 var(--ps);
-  text-indent: 2em;
-  text-align: justify;
+  text-indent: var(--indent, 2em);
+  text-align: var(--align, justify);
 }
 
 @keyframes nr-fade-in {
@@ -437,7 +441,7 @@
   position: fixed;
   z-index: 6;
   top: 50%;
-  left: clamp(12px, calc(50% + var(--pw) / 2 - var(--panel-w) + 2px), calc(100vw - var(--panel-w) - 90px));
+  left: clamp(12px, calc(50% + var(--pw, 640px) / 2 - var(--panel-w) + 2px), calc(100vw - var(--panel-w) - 90px));
   width: min(var(--panel-w), calc(100vw - 24px));
   max-height: min(760px, calc(100vh - 48px));
   display: flex;
@@ -491,6 +495,71 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.nr-book-search .nr-input {
+  flex: 1;
+  min-width: 0;
+}
+.nr-book-search .nr-btn {
+  flex: none;
+}
+.nr-search-group + .nr-search-group {
+  margin-top: 16px;
+}
+.nr-search-group h3 {
+  font-size: 13px;
+  margin: 6px 0;
+  color: var(--muted);
+}
+.nr-search-group .nr-btn + .nr-btn {
+  margin-left: 6px;
+}
+.nr-search-book {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.nr-search-book-row,
+.nr-search-book-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.nr-search-book-row {
+  justify-content: space-between;
+}
+.nr-search-book-link {
+  min-width: 0;
+  color: var(--text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.nr-search-book-link:hover {
+  color: var(--accent);
+}
+.nr-search-book-link svg,
+.nr-search-book-row > button {
+  flex: none;
+}
+.nr-search-book > p {
+  margin: 6px 0 0;
+}
+.nr-search-book small {
+  display: block;
+  color: var(--muted);
+}
+
+@media (min-width: 761px) and (max-height: 680px), (max-height: 460px) {
+  .nr-reader .nr-toolbar {
+    --tool-size: clamp(28px, 9vh, 46px);
+    gap: 4px;
+  }
+  .nr-toolbar .nr-tool {
+    width: var(--tool-size);
+    height: var(--tool-size);
+    font-size: 0;
+    gap: 0;
+  }
 }
 
 /* 设置项 */
@@ -579,6 +648,18 @@
 }
 
 /* 目录 */
+.nr-toc-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 20px 10px;
+}
+.nr-toc-tools .nr-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  font-size: 13px;
+}
 .nr-toc-list {
   list-style: none;
   margin: 0;
@@ -594,7 +675,8 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 9px 10px;
+  height: 38px;
+  padding: 0 10px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -622,14 +704,6 @@
   background: var(--accent-soft);
   color: var(--accent);
   font-weight: 600;
-}
-.nr-dot {
-  width: 6px;
-  height: 6px;
-  flex: none;
-  border-radius: 50%;
-  background: currentColor;
-  opacity: 0.5;
 }
 .nr-empty {
   padding: 40px 20px;
@@ -945,6 +1019,24 @@
   transform: translateX(-50%) rotate(45deg);
   border-radius: 2px;
 }
+.nr-selpop.is-below {
+  transform: translate(-50%, 10px);
+  animation: nr-pop-in-below 0.16s var(--ease);
+}
+@keyframes nr-pop-in-below {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 10px);
+  }
+}
+.nr-selpop.is-below::after {
+  bottom: auto;
+  top: -5px;
+}
 .nr-selpop button {
   position: relative;
   z-index: 1;
@@ -1029,7 +1121,9 @@
   opacity: 0;
   transition: opacity 0.12s;
 }
-.nr-excerpt:hover .nr-excerpt-del {
+.nr-excerpt:hover .nr-excerpt-del,
+.nr-excerpt:focus-within .nr-excerpt-del,
+.nr-excerpt-del:focus-visible {
   opacity: 1;
 }
 .nr-panel-foot {
@@ -1143,7 +1237,9 @@
   opacity: 0;
   transition: opacity 0.12s;
 }
-.nr-shelf-source:hover .nr-shelf-del {
+.nr-shelf-source:hover .nr-shelf-del,
+.nr-shelf-source:focus-within .nr-shelf-del,
+.nr-shelf-del:focus-visible {
   opacity: 1;
 }
 .nr-empty svg {
@@ -1361,4 +1457,31 @@ button.nr-source-main:hover {
   width: 16px;
   height: 16px;
   margin-right: 8px;
+}
+
+/* 底部阅读信息栏 */
+.nr-statusbar {
+  position: fixed;
+  z-index: 3;
+  left: 50%;
+  bottom: 8px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(var(--pw, 640px), calc(100vw - 180px));
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.nr-statusbar-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

@@ -1,21 +1,37 @@
 import { GM_deleteValue, GM_getValue, GM_setValue } from '$';
 import { ADAPTERS } from './sites/adapters';
 import { BUILTIN_SITES } from './sites/builtin';
-import type { BookInfo, Excerpt, Settings, ShelfBook, ShelfSource, SiteEntry } from './types';
+import type { BookInfo, Excerpt, ReplaceRule, Settings, ShelfBook, ShelfSource, SiteEntry } from './types';
 
-const SETTINGS_KEY = 'settings';
-const SITES_KEY = 'sites';
+export const SETTINGS_KEY = 'settings';
+export const SITES_KEY = 'sites';
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: 'parchment',
   font: 'hei',
+  customFont: '',
   fontSize: 22,
   width: 640,
   lineHeight: 1.8,
   paragraphSpacing: 1,
+  indent: true,
+  justify: true,
+  mergeParagraphs: true,
+  statusBar: true,
   pageMode: 'scroll',
   script: 'hans',
 };
+
+export const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+
+export function formatAgo(t: number): string {
+  const m = Math.round((Date.now() - t) / 60000);
+  if (m < 1) return '刚刚';
+  if (m < 60) return `${m} 分钟前`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} 小时前`;
+  return `${Math.round(h / 24)} 天前`;
+}
 
 export function loadSettings(): Settings {
   const saved = GM_getValue<Partial<Settings>>(SETTINGS_KEY, {});
@@ -44,13 +60,24 @@ type StoredSite = SiteEntry | BuiltinPatch;
 
 const isPatch = (s: StoredSite): s is BuiltinPatch => 'patch' in s;
 
+function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map((x) => (x === undefined ? 'null' : stableJson(x))).join(',')}]`;
+  if (isObject(v)) {
+    const keys = Object.keys(v)
+      .filter((k) => v[k] !== undefined)
+      .sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableJson(v[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v);
+}
+
 function diffFromBuiltin(def: SiteEntry, site: SiteEntry): Record<string, unknown> {
   const a = def as unknown as Record<string, unknown>;
   const b = site as unknown as Record<string, unknown>;
   const patch: Record<string, unknown> = {};
   for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
     if (key === 'id' || key === 'builtin') continue;
-    if (JSON.stringify(a[key]) !== JSON.stringify(b[key])) patch[key] = b[key] ?? null;
+    if (stableJson(a[key]) !== stableJson(b[key])) patch[key] = b[key] ?? null;
   }
   return patch;
 }
@@ -182,7 +209,7 @@ export function validateSite(raw: unknown): SiteEntry {
     throw new Error(`${s.id}：hosts 必须是非空字符串数组`);
   }
   if (typeof s.enabled !== 'boolean') throw new Error(`${s.id}：enabled 必须是布尔值`);
-  const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+  const isSiteObj = isObject;
   for (const key of ['chapterPattern', 'content', 'title']) {
     if (s[key] !== undefined && typeof s[key] !== 'string') throw new Error(`${s.id}：${key} 必须是字符串`);
   }
@@ -192,17 +219,30 @@ export function validateSite(raw: unknown): SiteEntry {
       throw new Error(`${s.id}：${key} 必须是非空字符串组成的数组`);
     }
   }
+  if (s.replace !== undefined) {
+    if (!Array.isArray(s.replace)) throw new Error(`${s.id}：replace 必须是数组`);
+    for (const r of s.replace) {
+      if (!isSiteObj(r) || typeof r.from !== 'string' || !r.from || typeof r.to !== 'string') {
+        throw new Error(`${s.id}：replace 条目必须是 { from, to }，且 from 不能为空`);
+      }
+      try {
+        new RegExp(r.from, 'g');
+      } catch {
+        throw new Error(`${s.id}：replace 正则不合法：${r.from}`);
+      }
+    }
+  }
   const locators = ['next', 'prev', 'tocLink', 'bookLink'] as const;
   for (const key of locators) {
     const loc = s[key];
     if (loc === undefined) continue;
-    if (!isObject(loc)) throw new Error(`${s.id}：${key} 必须是对象`);
+    if (!isSiteObj(loc)) throw new Error(`${s.id}：${key} 必须是对象`);
     for (const field of ['selector', 'text']) {
       if (loc[field] !== undefined && typeof loc[field] !== 'string') throw new Error(`${s.id}：${key}.${field} 必须是字符串`);
     }
   }
   if (s.toc !== undefined) {
-    if (!isObject(s.toc)) throw new Error(`${s.id}：toc 必须是对象`);
+    if (!isSiteObj(s.toc)) throw new Error(`${s.id}：toc 必须是对象`);
     for (const field of ['api', 'bookIdPattern']) {
       if (s.toc[field] !== undefined && typeof s.toc[field] !== 'string') throw new Error(`${s.id}：toc.${field} 必须是字符串`);
     }
@@ -219,12 +259,30 @@ export function validateSite(raw: unknown): SiteEntry {
   if (s.adapter !== undefined && !(typeof s.adapter === 'string' && s.adapter in ADAPTERS)) {
     throw new Error(`${s.id}：未知的 adapter：${String(s.adapter)}`);
   }
-  if (s.book !== undefined && (!s.book || typeof s.book !== 'object')) throw new Error(`${s.id}：book 必须是对象`);
+  if (s.book !== undefined && !isSiteObj(s.book)) throw new Error(`${s.id}：book 必须是对象`);
   if (s.search !== undefined) {
-    const search = s.search as Record<string, unknown> | null;
-    if (!search || typeof search.url !== 'string') throw new Error(`${s.id}：search.url 必须是字符串`);
+    const search = s.search;
+    if (!isSiteObj(search) || typeof search.url !== 'string' || !/^https?:\/\//i.test(search.url)) {
+      throw new Error(`${s.id}：search.url 必须是 http(s) 地址`);
+    }
     const template = typeof search.body === 'string' ? search.body : search.url;
     if (!template.includes('{name}')) throw new Error(`${s.id}：search 需要用 {name} 标出书名的位置`);
+    if (search.bookPath !== undefined) {
+      if (typeof search.bookPath !== 'string') throw new Error(`${s.id}：search.bookPath 必须是字符串`);
+      try {
+        new RegExp(search.bookPath);
+      } catch {
+        throw new Error(`${s.id}：正则不合法：${search.bookPath}`);
+      }
+    }
+    for (const field of ['body', 'charset', 'result', 'author', 'chapterRoot', 'startDirectory'] as const) {
+      if (search[field] !== undefined && typeof search[field] !== 'string') {
+        throw new Error(`${s.id}：search.${field} 必须是字符串`);
+      }
+    }
+    if (search.script !== undefined && search.script !== 'hans' && search.script !== 'hant') {
+      throw new Error(`${s.id}：search.script 必须是 hans 或 hant`);
+    }
   }
   const book = (s.book ?? {}) as Record<string, unknown>;
   const selectors: [string, unknown][] = [
@@ -233,6 +291,7 @@ export function validateSite(raw: unknown): SiteEntry {
     ['book.name', book.name],
     ['book.author', book.author],
     ['search.result', (s.search as Record<string, unknown> | undefined)?.result],
+    ['search.author', (s.search as Record<string, unknown> | undefined)?.author],
     ...locators.map((key): [string, unknown] => [`${key}.selector`, (s[key] as Record<string, unknown> | undefined)?.selector]),
     ...((s.remove as string[] | undefined) ?? []).map((sel, i): [string, unknown] => [`remove[${i}]`, sel]),
   ];
@@ -248,42 +307,94 @@ export function validateSite(raw: unknown): SiteEntry {
   return s as unknown as SiteEntry;
 }
 
-/** 一本书的标识：章节 URL 去掉最后一段（/txt/81780/、/books/996/ 这类目录） */
+/** 一本书的标识：章节 URL 去掉最后一段（/txt/81780/、/books/996/ 这类目录）；扁平 /123_456.html 归到 /123/ */
 export function bookKeyOf(url: string): string {
   const u = new URL(url);
-  return u.origin + u.pathname.replace(/[^/]*$/, '');
+  const dir = u.pathname.replace(/[^/]*$/, '');
+  if (dir === '/') {
+    const m = u.pathname.match(/^\/(\d+)[_-]\d+\.html$/i);
+    if (m) return `${u.origin}/${m[1]}/`;
+  }
+  return u.origin + dir;
 }
 
-const readKey = (bookKey: string) => `read:${bookKey}`;
+export const READ_PREFIX = 'read:';
+const readKey = (bookKey: string) => READ_PREFIX + bookKey;
 
 export function loadReadChapters(bookKey: string): string[] {
-  return GM_getValue<string[]>(readKey(bookKey), []);
+  const local = GM_getValue<string[]>(readKey(bookKey), []);
+  let rootKey: string;
+  try {
+    rootKey = `${new URL(bookKey).origin}/`;
+  } catch {
+    return local;
+  }
+  if (rootKey === bookKey) return local;
+  const rootList = GM_getValue<string[]>(readKey(rootKey), []);
+  if (!rootList.length) return local;
+  const mine = rootList.filter((u) => {
+    try {
+      return bookKeyOf(u) === bookKey;
+    } catch {
+      return false;
+    }
+  });
+  if (!mine.length) return local;
+  return [...local, ...mine.filter((u) => !local.includes(u))];
 }
 
 export function markChaptersRead(bookKey: string, urls: string[]): string[] {
   const read = loadReadChapters(bookKey);
   const added = urls.filter((u) => !read.includes(u));
   if (!added.length) return read;
-  const next = [...read, ...added];
+  const local = GM_getValue<string[]>(readKey(bookKey), []);
+  const next = [...local, ...added.filter((u) => !local.includes(u))];
   GM_setValue(readKey(bookKey), next);
-  return next;
+  return loadReadChapters(bookKey);
 }
 
-const EXCERPTS_KEY = 'excerpts';
+export const EXCERPTS_KEY = 'excerpts';
 
 export function loadExcerpts(): Excerpt[] {
-  return GM_getValue<Excerpt[]>(EXCERPTS_KEY, []);
+  const list = GM_getValue<Excerpt[]>(EXCERPTS_KEY, []);
+  return list.map((e) => {
+    try {
+      const originRoot = `${new URL(e.url).origin}/`;
+      const actualKey = bookKeyOf(e.url);
+      if (e.bookKey === originRoot && actualKey !== e.bookKey) {
+        return { ...e, bookKey: actualKey };
+      }
+    } catch {
+      // 保留非标准 url 的原有 bookKey
+    }
+    return e;
+  });
 }
 
 export function saveExcerpts(list: Excerpt[]): void {
   GM_setValue(EXCERPTS_KEY, list);
 }
 
-/** 修改站点规则里的过滤列表；站点必须已在列表中 */
-function updateSiteList(siteId: string, key: 'strip' | 'filters', change: (list: string[]) => string[]): SiteEntry {
-  const site = loadSites().find((s) => s.id === siteId);
-  if (!site) throw new Error('本站还不在阅读站点列表中，请先在设置 → 站点里添加');
-  const list = change(site[key] ?? []);
+function ensureEditableSite(siteId: string): SiteEntry {
+  const sites = loadSites();
+  const found = sites.find((s) => s.id === siteId);
+  if (found) return found;
+  if (siteId === 'temp' && typeof location !== 'undefined' && location.hostname) {
+    const host = normalizeHost(location.hostname);
+    return findSite(sites, host) ?? createSite(location.hostname);
+  }
+  throw new Error('本站还不在阅读站点列表中，请先在设置 → 站点里添加');
+}
+
+/** 修改站点规则里的过滤或替换列表；强制打开临时站点会自动保存进列表 */
+function updateSiteList<K extends 'strip' | 'filters' | 'replace'>(
+  siteId: string,
+  key: K,
+  change: (list: NonNullable<SiteEntry[K]>) => NonNullable<SiteEntry[K]>,
+): SiteEntry {
+  const site = ensureEditableSite(siteId);
+  const current = (site[key] ?? []) as NonNullable<SiteEntry[K]>;
+  const list = change(current);
   const updated = { ...site, [key]: list.length ? list : undefined };
   upsertSite(updated);
   return updated;
@@ -299,7 +410,13 @@ export function updateSiteFilters(siteId: string, change: (filters: string[]) =>
   return updateSiteList(siteId, 'filters', change);
 }
 
-const bookInfoKey = (bookKey: string) => `bookInfo:${bookKey}`;
+/** 正文替换规则 */
+export function updateSiteReplace(siteId: string, change: (replace: ReplaceRule[]) => ReplaceRule[]): SiteEntry {
+  return updateSiteList(siteId, 'replace', change);
+}
+
+export const BOOK_INFO_PREFIX = 'bookInfo:';
+const bookInfoKey = (bookKey: string) => BOOK_INFO_PREFIX + bookKey;
 
 export function loadBookInfo(bookKey: string): BookInfo | undefined {
   return GM_getValue<BookInfo | undefined>(bookInfoKey(bookKey), undefined);
@@ -309,10 +426,28 @@ export function saveBookInfo(bookKey: string, info: BookInfo): void {
   GM_setValue(bookInfoKey(bookKey), info);
 }
 
-const SHELF_KEY = 'shelf';
+export const SHELF_KEY = 'shelf';
 
 export function loadShelf(): ShelfBook[] {
-  return GM_getValue<ShelfBook[]>(SHELF_KEY, []);
+  const shelf = GM_getValue<ShelfBook[]>(SHELF_KEY, []);
+  for (const book of shelf) {
+    const byKey = new Map<string, ShelfSource>();
+    for (const s of book.sources) {
+      try {
+        const originRoot = `${new URL(s.lastUrl).origin}/`;
+        const actualKey = bookKeyOf(s.lastUrl);
+        if (s.bookKey === originRoot && actualKey !== s.bookKey) {
+          s.bookKey = actualKey;
+        }
+      } catch {
+        // 保留非标准 url 的原有 bookKey
+      }
+      const prev = byKey.get(s.bookKey);
+      if (!prev || s.updated > prev.updated) byKey.set(s.bookKey, s);
+    }
+    if (byKey.size !== book.sources.length) book.sources = [...byKey.values()];
+  }
+  return shelf;
 }
 
 export function saveShelf(shelf: ShelfBook[]): void {
@@ -373,18 +508,56 @@ export interface Arrival {
   shelfBookId?: string;
 }
 
+interface AutoOpenItem {
+  url: string;
+  time: number;
+  arrival?: Arrival;
+}
+
+function loadAutoOpenQueue(): AutoOpenItem[] {
+  const raw = GM_getValue<AutoOpenItem | AutoOpenItem[] | undefined>(AUTO_OPEN_KEY, undefined);
+  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  const now = Date.now();
+  return list.filter((it) => it && typeof it.url === 'string' && now - it.time < AUTO_OPEN_TTL);
+}
+
 export function requestAutoOpen(url: string, arrival: Arrival = {}): void {
-  GM_setValue(AUTO_OPEN_KEY, { url, time: Date.now(), arrival });
+  const strip = (u: string) => u.split('#')[0];
+  const target = strip(url);
+  const queue = loadAutoOpenQueue().filter((it) => strip(it.url) !== target);
+  queue.push({ url, time: Date.now(), arrival });
+  GM_setValue(AUTO_OPEN_KEY, queue);
 }
 
 /** 取出并清除自动打开请求；只有地址匹配且未过期时返回到达信息 */
 export function consumeAutoOpen(href: string): Arrival | undefined {
-  const req = GM_getValue<{ url: string; time: number; arrival?: Arrival } | undefined>(AUTO_OPEN_KEY, undefined);
-  if (!req) return undefined;
   const strip = (u: string) => u.split('#')[0];
-  if (strip(req.url) !== strip(href)) return undefined;
-  GM_deleteValue(AUTO_OPEN_KEY);
-  return Date.now() - req.time < AUTO_OPEN_TTL ? (req.arrival ?? {}) : undefined;
+  const target = strip(href);
+  const queue = loadAutoOpenQueue();
+  const idx = queue.findIndex((it) => strip(it.url) === target);
+  if (idx < 0) {
+    if (!queue.length) GM_deleteValue(AUTO_OPEN_KEY);
+    return undefined;
+  }
+  const [matched] = queue.splice(idx, 1);
+  if (queue.length) GM_setValue(AUTO_OPEN_KEY, queue);
+  else GM_deleteValue(AUTO_OPEN_KEY);
+  return matched.arrival ?? {};
+}
+
+export interface ReadingPosition {
+  url: string;
+  ratio: number;
+}
+
+const posKey = (bookKey: string) => `pos:${bookKey}`;
+
+export function loadReadingPosition(bookKey: string): ReadingPosition | undefined {
+  return GM_getValue<ReadingPosition | undefined>(posKey(bookKey), undefined);
+}
+
+export function saveReadingPosition(bookKey: string, pos: ReadingPosition): void {
+  GM_setValue(posKey(bookKey), pos);
 }
 
 export const READ_TITLES_PREFIX = 'readTitles:';

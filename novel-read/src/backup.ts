@@ -1,5 +1,17 @@
 import { GM_getValue, GM_listValues, GM_setValue } from '$';
-import { DEFAULT_SETTINGS, importSites, loadCustomizedSites, READ_TITLES_PREFIX, validateSite } from './storage';
+import {
+  BOOK_INFO_PREFIX,
+  DEFAULT_SETTINGS,
+  EXCERPTS_KEY,
+  importSites,
+  isObject,
+  loadCustomizedSites,
+  READ_PREFIX,
+  READ_TITLES_PREFIX,
+  SETTINGS_KEY,
+  SHELF_KEY,
+  validateSite,
+} from './storage';
 import type { BookInfo, Excerpt, Settings, ShelfBook, SiteEntry } from './types';
 
 /**
@@ -11,15 +23,13 @@ export type BackupCategory = 'settings' | 'sites' | 'reading' | 'excerpts';
 
 export const BACKUP_CATEGORIES: { id: BackupCategory; name: string; desc: string }[] = [
   { id: 'settings', name: '阅读设置', desc: '主题、字体、字号、宽度、间距、翻页、简繁' },
-  { id: 'sites', name: '站点与过滤', desc: '站点规则、站点过滤正则、划选过滤文字' },
+  { id: 'sites', name: '站点与过滤', desc: '站点规则、站点过滤正则、划选过滤文字、正文替换' },
   { id: 'reading', name: '阅读记录', desc: '书架、阅读进度、已读章节、书名作者' },
   { id: 'excerpts', name: '摘录', desc: '所有书的摘录' },
 ];
 
 const FORMAT = 'novel-reader-backup';
 const VERSION = 1;
-const READ_PREFIX = 'read:';
-const BOOK_INFO_PREFIX = 'bookInfo:';
 
 export interface BackupData {
   settings?: Partial<Settings>;
@@ -51,15 +61,15 @@ function prefixed<T>(prefix: string): Record<string, T> {
 export function collectBackup(categories: BackupCategory[]): BackupFile {
   const data: BackupData = {};
   const has = (c: BackupCategory) => categories.includes(c);
-  if (has('settings')) data.settings = GM_getValue<Partial<Settings>>('settings', {});
+  if (has('settings')) data.settings = GM_getValue<Partial<Settings>>(SETTINGS_KEY, {});
   if (has('sites')) data.sites = loadCustomizedSites();
   if (has('reading')) {
-    data.shelf = GM_getValue<ShelfBook[]>('shelf', []);
+    data.shelf = GM_getValue<ShelfBook[]>(SHELF_KEY, []);
     data.read = prefixed<string[]>(READ_PREFIX);
     data.readTitles = prefixed<string[]>(READ_TITLES_PREFIX);
     data.bookInfo = prefixed<BookInfo>(BOOK_INFO_PREFIX);
   }
-  if (has('excerpts')) data.excerpts = GM_getValue<Excerpt[]>('excerpts', []);
+  if (has('excerpts')) data.excerpts = GM_getValue<Excerpt[]>(EXCERPTS_KEY, []);
   return { format: FORMAT, version: VERSION, exportedAt: new Date().toISOString(), data };
 }
 
@@ -104,8 +114,8 @@ export function downloadBackup(file: BackupFile): string {
   return name;
 }
 
-const isObject = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const isStringArray = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === 'string');
+const isHttpUrl = (v: unknown): v is string => typeof v === 'string' && /^https?:\/\//i.test(v);
 
 /** 解析并校验备份文件；结构不对时抛出说明具体位置的错误 */
 export function parseBackup(text: string): BackupFile {
@@ -131,6 +141,16 @@ export function parseBackup(text: string): BackupFile {
     for (const b of d.shelf as unknown[]) {
       if (!isObject(b) || typeof b.name !== 'string' || typeof b.matchKey !== 'string' || !Array.isArray(b.sources)) {
         throw new Error('书架条目格式不正确');
+      }
+      for (const src of b.sources) {
+        if (
+          !isObject(src) ||
+          typeof src.bookKey !== 'string' ||
+          !isHttpUrl(src.lastUrl) ||
+          (src.bookUrl !== undefined && !isHttpUrl(src.bookUrl))
+        ) {
+          throw new Error('书架来源格式或链接地址不正确');
+        }
       }
     }
   }
@@ -177,11 +197,14 @@ function mergeShelf(local: ShelfBook[], incoming: ShelfBook[]): ShelfBook[] {
  */
 export function importBackup(data: BackupData): void {
   if (data.settings) {
-    const known = Object.fromEntries(Object.entries(data.settings).filter(([k]) => k in DEFAULT_SETTINGS));
-    GM_setValue('settings', { ...GM_getValue<Partial<Settings>>('settings', {}), ...known });
+    const defaults = DEFAULT_SETTINGS as unknown as Record<string, unknown>;
+    const known = Object.fromEntries(
+      Object.entries(data.settings).filter(([k, v]) => k in defaults && typeof v === typeof defaults[k]),
+    );
+    GM_setValue(SETTINGS_KEY, { ...GM_getValue<Partial<Settings>>(SETTINGS_KEY, {}), ...known });
   }
   if (data.sites) importSites(data.sites);
-  if (data.shelf) GM_setValue('shelf', mergeShelf(GM_getValue<ShelfBook[]>('shelf', []), data.shelf));
+  if (data.shelf) GM_setValue(SHELF_KEY, mergeShelf(GM_getValue<ShelfBook[]>(SHELF_KEY, []), data.shelf));
   const union = (prefix: string, lists: Record<string, string[]> | undefined) => {
     for (const [id, values] of Object.entries(lists ?? {})) {
       const local = GM_getValue<string[]>(prefix + id, []);
@@ -194,9 +217,9 @@ export function importBackup(data: BackupData): void {
     GM_setValue(BOOK_INFO_PREFIX + bookKey, info);
   }
   if (data.excerpts) {
-    const local = GM_getValue<Excerpt[]>('excerpts', []);
+    const local = GM_getValue<Excerpt[]>(EXCERPTS_KEY, []);
     const ids = new Set(local.map((e) => e.id));
     const merged = [...local, ...data.excerpts.filter((e) => !ids.has(e.id))].sort((a, b) => a.time - b.time);
-    GM_setValue('excerpts', merged);
+    GM_setValue(EXCERPTS_KEY, merged);
   }
 }

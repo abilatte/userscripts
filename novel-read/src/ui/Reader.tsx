@@ -1,6 +1,7 @@
-import { memo } from 'preact/compat';
+import { Component } from 'preact';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
-import { cleanText, foldFancyLetters } from '../core/extract';
+import { GM_addValueChangeListener, GM_removeValueChangeListener } from '$';
+import { cleanText, foldFancyLetters, mergeBrokenParagraphs } from '../core/extract';
 import { fetchBookInfo } from '../core/book';
 import { ChallengeError } from '../core/fetcher';
 import { createLoader } from '../core/loader';
@@ -13,9 +14,11 @@ import {
   addToShelf,
   type Arrival,
   bookKeyOf,
+  DEFAULT_SETTINGS,
   loadBookInfo,
   loadExcerpts,
   loadReadChapters,
+  loadReadingPosition,
   loadReadTitles,
   loadSettings,
   loadShelf,
@@ -26,13 +29,18 @@ import {
   requestAutoOpen,
   saveBookInfo,
   saveExcerpts,
+  saveReadingPosition,
+  SETTINGS_KEY,
+  SHELF_KEY,
+  SITES_KEY,
   updateShelfProgress,
   updateSiteStrip,
 } from '../storage';
-import type { BookInfo, Chapter, Settings, ShelfBook, ShelfSource, SiteEntry, TocItem } from '../types';
+import type { BookInfo, Chapter, ReplaceRule, Settings, ShelfBook, ShelfSource, SiteEntry, ThemeId, TocItem } from '../types';
 import { ExcerptPanel } from './ExcerptPanel';
 import { ShelfPanel } from './ShelfPanel';
 import { SourcePanel, type SourceRow } from './SourcePanel';
+import { SearchPanel } from './SearchPanel';
 import { openVerify } from './verify';
 import {
   IconArrowUp,
@@ -43,14 +51,15 @@ import {
   IconFilter,
   IconList,
   IconRefresh,
+  IconSearch,
   IconShelf,
   IconSliders,
   IconSwap,
 } from './icons';
-import { readerVars } from './options';
+import { FONT_SIZE, readerVars } from './options';
 import { SettingsPanel } from './SettingsPanel';
 import { TocPanel, type FullTocState } from './TocPanel';
-import { useReaderKeys } from './useReaderKeys';
+import { type KeyPanel, useReaderKeys } from './useReaderKeys';
 import { useSelection } from './useSelection';
 
 type Convert = (s: string) => string;
@@ -59,7 +68,12 @@ type Status =
   | { kind: 'loading' }
   | { kind: 'error'; message: string; retry: () => void; /** Cloudflare 验证时需要用户打开的页面 */ verifyUrl?: string }
   | { kind: 'end' };
-type Panel = 'none' | 'toc' | 'shelf' | 'source' | 'excerpts' | 'settings';
+type Panel = 'none' | KeyPanel;
+
+interface CompiledReplace {
+  re: RegExp;
+  to: string;
+}
 
 export interface ReaderProps {
   site: SiteEntry;
@@ -82,46 +96,67 @@ const READ_END_SLACK = 40;
 const KEEP_BEHIND = 2;
 
 /**
- * 显示前应用当前站点的过滤：
+ * 显示前应用当前站点的过滤与替换：
  * - filters（正则）命中原文、显示文字或花体还原后的文字，整段删除；
- * - strip（划选文字）在显示文字上删除，删完为空的段落整段去掉。
- * 划选是在显示出来的文字上做的，按显示文字匹配才不受简繁转换和异体字（臺/台、説/說）影响。
- * 章节缓存里的段落已经按加载时的规则过滤过，这里再过一遍，设置里改的规则就能立即生效。
+ * - replace（正则替换）和 strip（划选文字）在显示文字上生效，删完为空的段落整段去掉。
  */
-function renderParagraphs(paragraphs: string[], convert: Convert, filters: RegExp[], strip: string[]): string[] {
+function renderParagraphs(
+  paragraphs: string[],
+  convert: Convert,
+  filters: RegExp[],
+  strip: string[],
+  replace: CompiledReplace[],
+  mergeParagraphs: boolean,
+): string[] {
   const words = [...new Set(strip.flatMap((w) => [w, convert(w)]))];
-  return paragraphs
-    .filter((p) => !filters.some((f) => f.test(p) || f.test(foldFancyLetters(p))))
-    .map(convert)
-    .filter((p) => !filters.some((f) => f.test(p)))
-    .map((p) => (words.length ? cleanText(words.reduce((s, w) => s.split(w).join(''), p)) : p))
-    .filter(Boolean);
+  const out: string[] = [];
+  for (const raw of paragraphs) {
+    let folded: string | undefined;
+    const getFolded = () => (folded ??= foldFancyLetters(raw));
+    if (filters.some((f) => f.test(raw) || f.test(getFolded()))) continue;
+    let text = convert(raw);
+    if (filters.some((f) => f.test(text))) continue;
+    for (const r of replace) text = text.replace(r.re, r.to);
+    if (words.length) text = cleanText(words.reduce((s, w) => s.split(w).join(''), text));
+    if (text) out.push(text);
+  }
+  return mergeParagraphs ? mergeBrokenParagraphs(out) : out;
 }
 
-const ChapterView = memo(function ChapterView({
-  chapter,
-  convert,
-  filters,
-  strip,
-}: {
+interface ChapterViewProps {
   chapter: Chapter;
   convert: Convert;
   filters: RegExp[];
   strip: string[];
-}) {
-  const paragraphs = useMemo(
-    () => renderParagraphs(chapter.paragraphs, convert, filters, strip),
-    [chapter, convert, filters, strip],
-  );
-  return (
-    <article class="nr-chapter" data-url={chapter.url}>
-      <h1>{convert(chapter.title)}</h1>
-      {paragraphs.map((p, i) => (
-        <p key={i}>{p}</p>
-      ))}
-    </article>
-  );
-});
+  replace: CompiledReplace[];
+  mergeParagraphs: boolean;
+}
+
+class ChapterView extends Component<ChapterViewProps> {
+  shouldComponentUpdate(next: ChapterViewProps) {
+    const p = this.props;
+    return (
+      p.chapter !== next.chapter ||
+      p.convert !== next.convert ||
+      p.filters !== next.filters ||
+      p.strip !== next.strip ||
+      p.replace !== next.replace ||
+      p.mergeParagraphs !== next.mergeParagraphs
+    );
+  }
+
+  render({ chapter, convert, filters, strip, replace, mergeParagraphs }: ChapterViewProps) {
+    const paragraphs = renderParagraphs(chapter.paragraphs, convert, filters, strip, replace, mergeParagraphs);
+    return (
+      <article class="nr-chapter" data-url={chapter.url}>
+        <h1>{convert(chapter.title)}</h1>
+        {paragraphs.map((p, i) => (
+          <p key={i}>{p}</p>
+        ))}
+      </article>
+    );
+  }
+}
 
 function StatusView({ status, full, onReadapt }: { status: Status; full?: boolean; onReadapt?: () => void }) {
   const cls = `nr-status${full ? ' is-full' : ''}`;
@@ -183,7 +218,13 @@ function StatusView({ status, full, onReadapt }: { status: Status; full?: boolea
   return null;
 }
 
+const formatClock = () => {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
 export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onExit, onReadapt }: ReaderProps) {
+  const [activeSite, setActiveSite] = useState<SiteEntry>(site);
   const bookKey = useMemo(() => bookKeyOf(startUrl), [startUrl]);
   const [cachedInfo] = useState(() => loadBookInfo(bookKey));
   const [bookInfo, setBookInfo] = useState<BookInfo>(cachedInfo ?? { name: guessedBookName });
@@ -191,12 +232,15 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
   const [shelf, setShelf] = useState<ShelfBook[]>(loadShelf);
   const bookName = bookInfo.name;
   const [settings, setSettings] = useState<Settings>(loadSettings);
+  const lastLightTheme = useRef<ThemeId>(settings.theme === 'dark' ? 'parchment' : settings.theme);
+  if (settings.theme !== 'dark') lastLightTheme.current = settings.theme;
   const [convert, setConvert] = useState<{ fn: Convert } | undefined>();
   const [stream, setStream] = useState<Chapter[]>([]);
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
   const [current, setCurrent] = useState<string>(startUrl);
   const [session, setSession] = useState<TocItem[]>([]);
   const [read, setRead] = useState<string[]>(() => loadReadChapters(bookKey));
+  const readSet = useMemo(() => new Set(read), [read]);
   // 书名比较、跨站已读同步固定按简体进行，与显示用的简繁设置无关
   const [scripts, setScripts] = useState<{ hans: Convert }>();
   // 简→繁字典较大，只在换源面板要用繁体书名搜索时才加载
@@ -209,8 +253,10 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
   const [fullToc, setFullToc] = useState<FullTocState>({ kind: 'idle' });
   const [panel, setPanel] = useState<Panel>('none');
   const [toast, setToast] = useState<string>();
+  const [clock, setClock] = useState(formatClock);
   const [strip, setStrip] = useState<string[]>(site.strip ?? []);
   const [siteFilters, setSiteFilters] = useState<string[]>(site.filters ?? []);
+  const [siteReplace, setSiteReplace] = useState<ReplaceRule[]>(site.replace ?? []);
   // 规则在保存时已校验过；这里仍逐条编译，单条写错不影响其它规则
   const compiledFilters = useMemo(
     () =>
@@ -223,19 +269,85 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
       }),
     [siteFilters],
   );
+  const compiledReplace = useMemo<CompiledReplace[]>(
+    () =>
+      siteReplace.flatMap((r) => {
+        try {
+          return [{ re: new RegExp(r.from, 'g'), to: r.to }];
+        } catch {
+          return [];
+        }
+      }),
+    [siteReplace],
+  );
 
-  const loader = useMemo(() => createLoader(site), [site]);
+  const loader = useMemo(() => createLoader(activeSite), [activeSite]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const [selection, clearSelection] = useSelection(scrollRef);
   const token = useRef(0);
-  const live = useRef({ stream, status, settings, current, read, matchKey, scripts });
-  live.current = { stream, status, settings, current, read, matchKey, scripts };
+  const mounted = useRef(true);
+  const toastTimer = useRef(0);
+  const frame = useRef(0);
+  const posTimer = useRef(0);
+  const pendingPos = useRef<{ url: string; ratio: number }>();
+  const live = useRef({ stream, status, settings, current, readSet, matchKey, scripts });
+  live.current = { stream, status, settings, current, readSet, matchKey, scripts };
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      window.clearTimeout(toastTimer.current);
+      window.cancelAnimationFrame(frame.current);
+      window.clearTimeout(posTimer.current);
+      if (pendingPos.current) saveReadingPosition(bookKey, pendingPos.current);
+    };
+  }, [bookKey]);
 
   const showToast = useCallback((msg: string) => {
+    window.clearTimeout(toastTimer.current);
     setToast(msg);
-    window.setTimeout(() => setToast((t) => (t === msg ? undefined : t)), 4000);
+    toastTimer.current = window.setTimeout(() => {
+      if (mounted.current) setToast(undefined);
+    }, 4000);
   }, []);
+
+  // ---------- 跨标签页同步 ----------
+  useEffect(() => {
+    if (typeof GM_addValueChangeListener !== 'function') return;
+    const ids = [
+      GM_addValueChangeListener(SETTINGS_KEY, (_k, _old, val, remote) => {
+        if (remote && val) setSettings({ ...DEFAULT_SETTINGS, ...(val as Partial<Settings>) });
+      }),
+      GM_addValueChangeListener(SHELF_KEY, (_k, _old, val, remote) => {
+        if (remote && Array.isArray(val)) setShelf(val as ShelfBook[]);
+      }),
+      GM_addValueChangeListener(SITES_KEY, (_k, _old, _val, remote) => {
+        if (!remote) return;
+        const entry = loadSites().find((s) => s.id === activeSite.id);
+        if (entry) {
+          setActiveSite(entry);
+          setStrip(entry.strip ?? []);
+          setSiteFilters(entry.filters ?? []);
+          setSiteReplace(entry.replace ?? []);
+        }
+      }),
+    ];
+    return () => {
+      if (typeof GM_removeValueChangeListener === 'function') {
+        ids.forEach((id) => GM_removeValueChangeListener(id));
+      }
+    };
+  }, [activeSite.id]);
+
+  // ---------- 状态栏时钟 ----------
+  useEffect(() => {
+    if (settings.statusBar === false) return;
+    setClock(formatClock());
+    const id = window.setInterval(() => setClock(formatClock()), 30_000);
+    return () => window.clearInterval(id);
+  }, [settings.statusBar]);
 
   // ---------- 简繁转换 ----------
   useEffect(() => {
@@ -254,25 +366,35 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
   }, [settings.script, showToast]);
 
   useEffect(() => {
+    let alive = true;
     getConverter('hans').then(
-      (hans) => setScripts({ hans }),
+      (hans) => alive && setScripts({ hans }),
       // 转换库加载失败时退化为原文比较：跨站匹配可能漏掉简繁不同的书名
       (e: Error) => {
+        if (!alive) return;
         console.warn(`[小说阅读模式] 简繁转换不可用，换源按原文比较：${e.message}`);
         setScripts({ hans: (s) => s });
       },
     );
+    return () => {
+      alive = false;
+    };
   }, []);
 
   useEffect(() => {
     if (panel !== 'source' || hant) return;
+    let alive = true;
     getConverter('hant').then(
-      (fn) => setHant({ fn }),
+      (fn) => alive && setHant({ fn }),
       (e: Error) => {
+        if (!alive) return;
         console.warn(`[小说阅读模式] 繁体字典不可用，换源只用原书名和简体书名搜索：${e.message}`);
         setHant({ fn: (s) => s });
       },
     );
+    return () => {
+      alive = false;
+    };
   }, [panel, hant]);
 
   useEffect(() => {
@@ -292,13 +414,13 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
       scrollRef.current?.scrollTo({ top: 0 });
       loader.load(url, doc).then(
         (ch) => {
-          if (t !== token.current) return;
+          if (!mounted.current || t !== token.current) return;
           setStream([ch]);
           setCurrent(ch.url);
           setStatus(ch.nextUrl ? { kind: 'idle' } : { kind: 'end' });
         },
         (e: Error) => {
-          if (t !== token.current) return;
+          if (!mounted.current || t !== token.current) return;
           setStatus({
             kind: 'error',
             message: e.message,
@@ -324,12 +446,16 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
     setStatus({ kind: 'loading' });
     loader.load(last.nextUrl).then(
       (ch) => {
-        if (t !== token.current) return;
+        if (!mounted.current || t !== token.current) return;
+        if (live.current.stream.some((c) => c.url === ch.url)) {
+          setStatus({ kind: 'end' });
+          return;
+        }
         setStream((prev) => (prev.some((c) => c.url === ch.url) ? prev : [...prev, ch]));
         setStatus(ch.nextUrl ? { kind: 'idle' } : { kind: 'end' });
       },
       (e: Error) => {
-        if (t !== token.current) return;
+        if (!mounted.current || t !== token.current) return;
         setStatus({
           kind: 'error',
           message: e.message,
@@ -345,6 +471,22 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
     // 只在打开时加载一次首章
   }, []);
 
+  // 首章渲染后恢复上次章内阅读位置
+  const restoredPos = useRef(false);
+  useEffect(() => {
+    if (restoredPos.current || !convert || !stream.length) return;
+    restoredPos.current = true;
+    const savedPos = loadReadingPosition(bookKey);
+    if (savedPos && savedPos.url === startUrl && savedPos.ratio > 0.02) {
+      requestAnimationFrame(() => {
+        const el = scrollRef.current;
+        if (!el) return;
+        const maxScroll = el.scrollHeight - el.clientHeight;
+        if (maxScroll > 0) el.scrollTop = Math.min(maxScroll, maxScroll * savedPos.ratio);
+      });
+    }
+  }, [convert, stream.length, bookKey, startUrl]);
+
   // 章节翻页模式：后台预加载下一章（失败时真正翻页会重新请求并报错）
   const shown = stream[stream.length - 1];
   useEffect(() => {
@@ -356,11 +498,17 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
   const tocUrl = head?.tocUrl;
   const loadToc = useCallback(() => {
     setFullToc({ kind: 'loading' });
-    loadFullToc(site, live.current.current, tocUrl).then(
-      (items) => setFullToc({ kind: 'ready', items }),
-      (e: Error) => setFullToc({ kind: 'error', message: e.message }),
+    loadFullToc(activeSite, live.current.current, tocUrl).then(
+      (items) => mounted.current && setFullToc({ kind: 'ready', items }),
+      (e: Error) =>
+        mounted.current &&
+        setFullToc({
+          kind: 'error',
+          message: e.message,
+          verifyUrl: e instanceof ChallengeError ? e.verifyUrl : undefined,
+        }),
     );
-  }, [site, tocUrl]);
+  }, [activeSite, tocUrl]);
   useEffect(() => {
     if (head && fullToc.kind === 'idle') loadToc();
   }, [head, fullToc.kind, loadToc]);
@@ -368,9 +516,8 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
   // 本站按地址记录的已读章节，同步一份标题到按书记录里，换到其它站点也能显示已读
   useEffect(() => {
     if (!matchKey || !scripts || fullToc.kind !== 'ready') return;
-    const urls = new Set(read);
     const keys = tocTitleKeys(fullToc.items, scripts.hans);
-    setReadTitles(addReadTitles(matchKey, fullToc.items.flatMap((it, i) => (urls.has(it.url) ? [keys[i]] : []))));
+    setReadTitles(addReadTitles(matchKey, fullToc.items.flatMap((it, i) => (readSet.has(it.url) ? [keys[i]] : []))));
   }, [matchKey, scripts, fullToc]);
 
   // ---------- 书名、作者：从书页读取，按书缓存 ----------
@@ -383,8 +530,9 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
     const tried = candidates.join('\n');
     if (infoTried.current === tried) return;
     infoTried.current = tried;
-    fetchBookInfo(candidates, site).then(
+    fetchBookInfo(candidates, activeSite).then(
       (info) => {
+        if (!mounted.current) return;
         infoLoaded.current = true;
         saveBookInfo(bookKey, info);
         setBookInfo(info);
@@ -392,6 +540,7 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
       },
       // 书名用于摘录出处和书架，取不到时沿用网页标题里猜出的书名
       (e: Error) => {
+        if (!mounted.current) return;
         console.warn(`[小说阅读模式] 获取书名失败，使用「${guessedBookName}」：${e.message}`);
         setInfoReady(true);
       },
@@ -431,13 +580,16 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
       setBookInfo(info);
       setInfoReady(true);
     }
-    const entry = loadSites().find((s) => s.id === site.id);
-    setStrip(entry?.strip ?? []);
-    setSiteFilters(entry?.filters ?? []);
+    const entry = loadSites().find((s) => s.id === activeSite.id);
+    if (entry) {
+      setActiveSite(entry);
+      setStrip(entry.strip ?? []);
+      setSiteFilters(entry.filters ?? []);
+      setSiteReplace(entry.replace ?? []);
+    }
   };
 
   // ---------- 滚动跟踪 ----------
-  const frame = useRef(0);
   /** 裁剪旧章节前记下当前章在视口里的位置，裁剪后按它把滚动位置对回去 */
   const anchor = useRef<{ url: string; top: number }>();
   const onScroll = useCallback(() => {
@@ -446,32 +598,60 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
       frame.current = 0;
       const el = scrollRef.current;
       if (!el) return;
+
+      // 阶段 1：统一读取全部几何信息，避免读写交叉触发强制回流
+      const scrollTop = el.scrollTop;
+      const clientHeight = el.clientHeight;
+      const scrollHeight = el.scrollHeight;
       const nodes = [...el.querySelectorAll<HTMLElement>('.nr-chapter')];
-      const line = el.scrollTop + CURRENT_LINE;
-      const node = nodes.filter((n) => n.offsetTop <= line).pop() ?? nodes[0];
-      if (node) {
-        const url = node.dataset.url!;
-        if (url !== live.current.current) setCurrent(url);
-        const p = (el.scrollTop + el.clientHeight - node.offsetTop) / node.offsetHeight;
-        // 进度每帧都变，直接写样式，不触发整个阅读器重新渲染
-        if (progressRef.current) progressRef.current.style.width = `${Math.max(0, Math.min(1, p)) * 100}%`;
-        const idx = nodes.indexOf(node);
-        if (live.current.settings.pageMode === 'scroll' && idx > KEEP_BEHIND + 1) {
-          const keepFrom = nodes[idx - KEEP_BEHIND].dataset.url!;
-          const from = (list: Chapter[]) => list.findIndex((c) => c.url === keepFrom);
-          // 确认真的会裁掉内容才记锚点，否则锚点会留到下一次章节变化时误用
-          if (from(live.current.stream) > 0) {
-            anchor.current = { url, top: node.getBoundingClientRect().top };
-            setStream((prev) => (from(prev) > 0 ? prev.slice(from(prev)) : prev));
-          }
+      const metrics = nodes.map((n) => ({
+        node: n,
+        url: n.dataset.url!,
+        top: n.offsetTop,
+        height: n.offsetHeight,
+      }));
+      const line = scrollTop + CURRENT_LINE;
+      const currentMetric = metrics.filter((m) => m.top <= line).pop() ?? metrics[0];
+      const currentIdx = currentMetric ? metrics.indexOf(currentMetric) : -1;
+      let trimFromUrl: string | undefined;
+      let anchorTop: number | undefined;
+      if (currentMetric && live.current.settings.pageMode === 'scroll' && currentIdx > KEEP_BEHIND + 1) {
+        const candidateUrl = metrics[currentIdx - KEEP_BEHIND].url;
+        if (live.current.stream.findIndex((c) => c.url === candidateUrl) > 0) {
+          trimFromUrl = candidateUrl;
+          anchorTop = currentMetric.node.getBoundingClientRect().top;
         }
       }
-      // 章节末尾进入视口即记为已读
-      const viewBottom = el.scrollTop + el.clientHeight + READ_END_SLACK;
-      const finished = nodes
-        .filter((n) => n.offsetTop + n.offsetHeight <= viewBottom)
-        .map((n) => n.dataset.url!)
-        .filter((u) => !live.current.read.includes(u));
+      const viewBottom = scrollTop + clientHeight + READ_END_SLACK;
+      const finished = metrics
+        .filter((m) => m.top + m.height <= viewBottom)
+        .map((m) => m.url)
+        .filter((u) => !live.current.readSet.has(u));
+      const remain = scrollHeight - scrollTop - clientHeight;
+
+      // 阶段 2：统一执行写入与状态更新
+      if (currentMetric) {
+        if (currentMetric.url !== live.current.current) setCurrent(currentMetric.url);
+        const p = currentMetric.height ? (scrollTop + clientHeight - currentMetric.top) / currentMetric.height : 0;
+        const progress = Math.max(0, Math.min(1, p));
+        if (progressRef.current) progressRef.current.style.transform = `scaleX(${progress})`;
+        const scrollable = currentMetric.height - clientHeight;
+        const ratio = scrollable > 0 ? Math.max(0, Math.min(1, (scrollTop - currentMetric.top) / scrollable)) : 0;
+        pendingPos.current = { url: currentMetric.url, ratio };
+        if (!posTimer.current) {
+          posTimer.current = window.setTimeout(() => {
+            posTimer.current = 0;
+            if (pendingPos.current) saveReadingPosition(bookKey, pendingPos.current);
+          }, 600);
+        }
+      }
+      if (trimFromUrl && anchorTop !== undefined && currentMetric) {
+        anchor.current = { url: currentMetric.url, top: anchorTop };
+        setStream((prev) => {
+          const fromIdx = prev.findIndex((c) => c.url === trimFromUrl);
+          return fromIdx > 0 ? prev.slice(fromIdx) : prev;
+        });
+      }
       if (finished.length) {
         setRead(markChaptersRead(bookKey, finished));
         const { matchKey: key, scripts: sc, stream: chapters } = live.current;
@@ -480,8 +660,7 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
           setReadTitles(addReadTitles(key, titles.map((t) => titleKey(t, sc.hans))));
         }
       }
-      const remain = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (live.current.settings.pageMode === 'scroll' && remain < el.clientHeight * PRELOAD_SCREENS) loadMore();
+      if (live.current.settings.pageMode === 'scroll' && remain < clientHeight * PRELOAD_SCREENS) loadMore();
     });
   }, [loadMore, bookKey]);
 
@@ -544,7 +723,8 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
       return;
     }
     try {
-      const updated = updateSiteStrip(site.id, (list) => (list.includes(text) ? list : [...list, text]));
+      const updated = updateSiteStrip(activeSite.id, (list) => (list.includes(text) ? list : [...list, text]));
+      setActiveSite(updated);
       setStrip(updated.strip ?? []);
       showToast(`已加入本站过滤：${text}`);
     } catch (e) {
@@ -555,7 +735,7 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
 
   // ---------- 书架 ----------
   const shelfSource = (chapter: Chapter): ShelfSource => ({
-    siteId: site.id,
+    siteId: activeSite.id,
     host: new URL(chapter.url).hostname.replace(/^www\./, ''),
     bookKey,
     bookUrl: bookInfo.bookUrl,
@@ -622,15 +802,18 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
     [showChapter],
   );
 
-  const exit = useCallback(() => onExit(live.current.current), [onExit]);
+  const exit = useCallback(() => {
+    if (pendingPos.current) saveReadingPosition(bookKey, pendingPos.current);
+    onExit(live.current.current);
+  }, [bookKey, onExit]);
 
   const goNext = useCallback(() => {
-    const ch = live.current.stream[0];
+    const ch = live.current.stream.find((c) => c.url === live.current.current) ?? live.current.stream.at(-1);
     if (ch?.nextUrl) showChapter(ch.nextUrl);
     else showToast('已是最新章节');
   }, [showChapter, showToast]);
   const goPrev = useCallback(() => {
-    const ch = live.current.stream[0];
+    const ch = live.current.stream.find((c) => c.url === live.current.current) ?? live.current.stream[0];
     if (ch?.prevUrl) showChapter(ch.prevUrl);
     else showToast('没有上一章了');
   }, [showChapter, showToast]);
@@ -638,10 +821,15 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
   const isChapterMode = settings.pageMode === 'chapter';
   useReaderKeys(scrollRef, {
     chapterMode: isChapterMode,
+    hasSelection: !!selection && panel === 'none',
+    onClearSelection: clearSelection,
     onEscape: () => (panel !== 'none' ? setPanel('none') : exit()),
     onNext: goNext,
     onPrev: goPrev,
     onTogglePanel: (p) => setPanel((cur) => (cur === p ? 'none' : p)),
+    onToggleDark: () => updateSettings({ theme: live.current.settings.theme === 'dark' ? lastLightTheme.current : 'dark' }),
+    onFontSize: (delta) =>
+      updateSettings({ fontSize: Math.max(FONT_SIZE.min, Math.min(FONT_SIZE.max, live.current.settings.fontSize + delta)) }),
   });
 
   const fn = convert?.fn;
@@ -650,7 +838,6 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
     title: sourceChapter.title,
     index: fullToc.kind === 'ready' ? fullToc.items.findIndex((i) => i.url === sourceChapter.url) : -1,
   };
-  const readSet = useMemo(() => new Set(read), [read]);
   const readTitleSet = useMemo(() => new Set(readTitles), [readTitles]);
   // 整本目录的标题键只算一次；目录面板每次渲染都要对全部章节判断已读
   const tocKeyByUrl = useMemo(() => {
@@ -668,9 +855,14 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
   );
   const togglePanel = (p: Panel) => setPanel(panel === p ? 'none' : p);
 
+  const tocIndex = useMemo(() => {
+    if (fullToc.kind !== 'ready' || !currentChapter) return -1;
+    return fullToc.items.findIndex((i) => i.url === currentChapter.url);
+  }, [fullToc, currentChapter]);
+
   return (
     <div class="nr-ui nr-reader" data-theme={settings.theme} style={readerVars(settings)}>
-      <div class="nr-progress" ref={progressRef} style="width:0" />
+      <div class="nr-progress" ref={progressRef} style="transform:scaleX(0)" />
       <div class="nr-scroll" ref={scrollRef} tabIndex={-1} onScroll={onScroll}>
         <div class="nr-paper">
           {!fn || !stream.length ? (
@@ -678,7 +870,15 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
           ) : (
             <>
               {stream.map((ch) => (
-                <ChapterView key={ch.url} chapter={ch} convert={fn} filters={compiledFilters} strip={strip} />
+                <ChapterView
+                  key={ch.url}
+                  chapter={ch}
+                  convert={fn}
+                  filters={compiledFilters}
+                  strip={strip}
+                  replace={compiledReplace}
+                  mergeParagraphs={settings.mergeParagraphs !== false}
+                />
               ))}
               {isChapterMode ? (
                 <div class="nr-pager">
@@ -703,9 +903,21 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
         </div>
       </div>
 
+      {settings.statusBar !== false && currentChapter && (
+        <div class="nr-statusbar">
+          <span class="nr-statusbar-title">{fn ? fn(currentChapter.title) : currentChapter.title}</span>
+          {fullToc.kind === 'ready' && tocIndex >= 0 && (
+            <span>
+              {tocIndex + 1} / {fullToc.items.length} ({Math.round(((tocIndex + 1) / fullToc.items.length) * 100)}%)
+            </span>
+          )}
+          <span>{clock}</span>
+        </div>
+      )}
+
       {selection && panel === 'none' && (
         <div
-          class="nr-selpop"
+          class={`nr-selpop${selection.below ? ' is-below' : ''}`}
           style={{ left: `${selection.x}px`, top: `${selection.y}px` }}
           onMouseDown={(e) => e.preventDefault()}
         >
@@ -722,19 +934,23 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
       )}
 
       <nav class="nr-toolbar">
-        <button class={`nr-tool${panel === 'toc' ? ' is-active' : ''}`} onClick={() => togglePanel('toc')}>
+        <button class={`nr-tool${panel === 'toc' ? ' is-active' : ''}`} onClick={() => togglePanel('toc')} title="目录 (T)">
           <IconList />
           目录
         </button>
-        <button class={`nr-tool${panel === 'shelf' ? ' is-active' : ''}`} onClick={() => togglePanel('shelf')}>
+        <button class={`nr-tool${panel === 'shelf' ? ' is-active' : ''}`} onClick={() => togglePanel('shelf')} title="书架 (B)">
           <IconShelf />
           书架
         </button>
-        <button class={`nr-tool${panel === 'source' ? ' is-active' : ''}`} onClick={() => togglePanel('source')}>
+        <button class={`nr-tool${panel === 'source' ? ' is-active' : ''}`} onClick={() => togglePanel('source')} title="换源 (S)">
           <IconSwap />
           换源
         </button>
-        <button class={`nr-tool${panel === 'excerpts' ? ' is-active' : ''}`} onClick={() => togglePanel('excerpts')}>
+        <button class={`nr-tool${panel === 'search' ? ' is-active' : ''}`} onClick={() => togglePanel('search')} title="搜书 (F)">
+          <IconSearch />
+          搜书
+        </button>
+        <button class={`nr-tool${panel === 'excerpts' ? ' is-active' : ''}`} onClick={() => togglePanel('excerpts')} title="摘录 (E)">
           <IconBookmark />
           摘录
         </button>
@@ -746,7 +962,7 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
           <IconArrowUp />
           顶部
         </button>
-        <button class="nr-tool" onClick={exit}>
+        <button class="nr-tool" onClick={exit} title="退出 (Esc)">
           <IconExit />
           退出
         </button>
@@ -778,9 +994,9 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
           onClose={() => setPanel('none')}
         />
       )}
-      {panel === 'source' && scripts && hant && (
+      {panel === 'source' && (
         <SourcePanel
-          site={site}
+          site={activeSite}
           bookKey={bookKey}
           name={bookInfo.name}
           author={bookInfo.author}
@@ -789,8 +1005,8 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
           current={currentForSource}
           currentToc={fullToc.kind === 'ready' ? fullToc.items : undefined}
           shelf={shelf}
-          hans={scripts.hans}
-          hant={hant.fn}
+          hans={scripts?.hans}
+          hant={hant?.fn}
           convert={fn ?? ((s) => s)}
           onSwitch={switchSource}
           onClose={() => setPanel('none')}
@@ -803,16 +1019,19 @@ export function Reader({ site, startUrl, firstDoc, guessedBookName, arrival, onE
           showToast={showToast}
         />
       )}
+      {panel === 'search' && <SearchPanel convert={fn ?? ((s) => s)} onClose={() => setPanel('none')} />}
       {panel === 'settings' && (
         <SettingsPanel
           settings={settings}
           update={updateSettings}
           setPageMode={setPageMode}
-          site={site}
+          site={activeSite}
           onReadapt={onReadapt}
           onSiteChange={(s) => {
+            setActiveSite(s);
             setStrip(s.strip ?? []);
             setSiteFilters(s.filters ?? []);
+            setSiteReplace(s.replace ?? []);
           }}
           onImported={reloadStored}
           onClose={() => setPanel('none')}

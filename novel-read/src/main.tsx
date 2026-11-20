@@ -5,22 +5,38 @@ import type { SiteEntry } from './types';
 import { Entry } from './ui/Entry';
 import { mountHost, type Host } from './ui/host';
 import { Picker } from './ui/Picker';
+import { QuickHub } from './ui/QuickHub';
 import { Reader } from './ui/Reader';
 
 const ENTRY_ID = 'nr-entry';
 const READER_ID = 'nr-reader';
 const PICKER_ID = 'nr-picker';
+const HUB_ID = 'nr-hub';
 /** 强制打开时使用的临时站点 id，适配保存后才加入站点列表 */
 const TEMP_ID = 'temp';
 
 let entry: Host | undefined;
 let reader: Host | undefined;
 let picker: Host | undefined;
+let hub: Host | undefined;
 let styleInjected = false;
 
 function hideEntry() {
   entry?.destroy();
   entry = undefined;
+}
+
+function hideHub() {
+  hub?.destroy();
+  hub = undefined;
+}
+
+function openHub() {
+  if (hub) {
+    hideHub();
+    return;
+  }
+  hub = mountHost(HUB_ID, <QuickHub onClose={hideHub} />);
 }
 
 function showEntry(site: SiteEntry, kind: 'read' | 'adapt') {
@@ -34,6 +50,7 @@ function showEntry(site: SiteEntry, kind: 'read' | 'adapt') {
 function openReader(site: SiteEntry, arrival?: Arrival) {
   if (reader) return;
   hideEntry();
+  hideHub();
   if (!styleInjected) {
     // 阅读模式下隐藏原页面（含后插入的广告），只保留阅读器
     GM_addStyle(`
@@ -113,6 +130,7 @@ function guessBookName(): string {
 function startPicker(site: SiteEntry) {
   if (picker) return;
   hideEntry();
+  hideHub();
   const stop = () => {
     picker?.destroy();
     picker = undefined;
@@ -140,9 +158,8 @@ function tempSite(): SiteEntry {
 }
 
 /** 判断当前页面并显示对应的入口按钮 */
-function boot(): boolean {
+function boot(site = findSite(loadSites(), location.hostname)): boolean {
   hideEntry();
-  const site = findSite(loadSites(), location.hostname);
   if (!site || !site.enabled) return false;
   if (detectPage(document, site, location.href)) {
     // 从书架跳转过来的章节直接进入阅读模式
@@ -151,28 +168,28 @@ function boot(): boolean {
     else showEntry(site, 'read');
     return true;
   }
-  if (!site.content) {
+  if (!site.content && !site.adapter) {
     showEntry(site, 'adapt');
     return true;
   }
   return false;
 }
 
-function registerMenus() {
-  const site = findSite(loadSites(), location.hostname);
+function registerMenus(site: SiteEntry | undefined) {
   if (!site) {
     GM_registerMenuCommand('将本站加入阅读站点', () => {
       try {
-        createSite(location.hostname);
-        boot();
+        const added = createSite(location.hostname);
+        boot(added);
       } catch (e) {
         alert((e as Error).message);
       }
     });
   } else {
-    GM_registerMenuCommand('适配本站（点选正文）', () => startPicker(site));
+    GM_registerMenuCommand('适配本站（点选正文）', () => startPicker(findSite(loadSites(), location.hostname) ?? site));
   }
-  GM_registerMenuCommand('强制在此页打开阅读模式', () => openReader(site ?? tempSite()));
+  GM_registerMenuCommand('强制在此页打开阅读模式', () => openReader(findSite(loadSites(), location.hostname) ?? tempSite()));
+  GM_registerMenuCommand('打开书架 / 搜书', openHub);
 }
 
 /** 页面内容变化后隔多久重新判断一次 */
@@ -184,16 +201,14 @@ const LATE_BOOT_WINDOW = 10_000;
  * 部分站点正文由脚本延迟渲染：load 后再判断一次，仍识别不到就在一段时间内跟随页面变化重试。
  * 只对站点列表里的站点监听，其它网页不受影响。
  */
-function bootLater() {
+function bootLater(site: SiteEntry) {
   const idle = () => !reader && !picker;
-  if (!idle() || boot()) return;
-  const site = findSite(loadSites(), location.hostname);
-  if (!site?.enabled) return;
+  if (!idle() || boot(site)) return;
   let timer = 0;
   const observer = new MutationObserver(() => {
     window.clearTimeout(timer);
     timer = window.setTimeout(() => {
-      if (!idle() || boot()) stop();
+      if (!idle() || boot(site)) stop();
     }, LATE_BOOT_DEBOUNCE);
   });
   const stop = () => {
@@ -205,8 +220,9 @@ function bootLater() {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-registerMenus();
-if (!boot()) {
-  if (document.readyState === 'complete') bootLater();
-  else window.addEventListener('load', bootLater, { once: true });
+const initialSite = findSite(loadSites(), location.hostname);
+registerMenus(initialSite);
+if (initialSite?.enabled && !boot(initialSite)) {
+  if (document.readyState === 'complete') bootLater(initialSite);
+  else window.addEventListener('load', () => bootLater(initialSite), { once: true });
 }

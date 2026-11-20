@@ -17,6 +17,8 @@ export const COMMON_FILTERS: { pattern: string; desc: string }[] = [
   { pattern: '(记住|記住|认准|認準).{0,12}(域名|网址|網址)', desc: '「记住本站域名 / 网址」' },
 ];
 
+const COMMON_FILTER_REGEXES = COMMON_FILTERS.map((c) => new RegExp(c.pattern, 'i'));
+
 const MIN_CONTENT_LENGTH = 100;
 
 export interface DetectResult {
@@ -30,6 +32,7 @@ function cleanText(s: string | null | undefined): string {
 
 /** 自动识别正文块：直接文本（文本节点 + 子 p）最多的元素 */
 export function detectContent(doc: Document): Element | undefined {
+  if (!doc.body) return undefined;
   let best: Element | undefined;
   let bestScore = 0;
   for (const el of doc.body.querySelectorAll('div, article, section, td, main')) {
@@ -52,7 +55,7 @@ function isUsableHref(a: HTMLAnchorElement): boolean {
 }
 
 export function findLink(doc: Document, locator: LinkLocator | undefined, fallback: RegExp): HTMLAnchorElement | undefined {
-  const scopes = locator?.selector ? [...doc.querySelectorAll(locator.selector)] : [doc.body];
+  const scopes = locator?.selector ? [...doc.querySelectorAll(locator.selector)] : doc.body ? [doc.body] : [];
   const anchors = scopes.flatMap((s) => (s instanceof HTMLAnchorElement ? [s] : [...s.querySelectorAll('a')]));
   const match = (a: HTMLAnchorElement) =>
     locator?.text ? cleanText(a.textContent) === locator.text : fallback.test(cleanText(a.textContent));
@@ -109,17 +112,20 @@ function extractTitle(doc: Document, site: SiteEntry, content: Element): string 
   if (h1) return h1;
   const inContent = cleanText(content.querySelector('h1, h2, h3')?.textContent);
   if (inContent) return inContent;
-  return cleanText(doc.title.split(/[-_|－—]/)[0]);
+  return cleanText(doc.title.split(/[-_|｜–—－]/)[0]);
 }
 
 function compileFilters(site: SiteEntry): RegExp[] {
-  return [...COMMON_FILTERS.map((c) => c.pattern), ...(site.filters ?? [])].map((f) => {
-    try {
-      return new RegExp(f, 'i');
-    } catch {
-      throw new Error(`段落过滤正则无效：${f}`);
-    }
-  });
+  return [
+    ...COMMON_FILTER_REGEXES,
+    ...(site.filters ?? []).map((f) => {
+      try {
+        return new RegExp(f, 'i');
+      } catch {
+        throw new Error(`段落过滤正则无效：${f}`);
+      }
+    }),
+  ];
 }
 
 /**
@@ -177,20 +183,23 @@ export function foldFancyLetters(s: string): string {
 }
 
 const BLOCK_TAGS = new Set(['P', 'DIV', 'SECTION', 'ARTICLE', 'LI', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE']);
+const BLOCK_SELECTOR = 'p,div,section,article,li,h1,h2,h3,h4,h5,h6,blockquote';
 
 export function extractParagraphs(content: Element, site: SiteEntry, title: string): string[] {
   const root = content.cloneNode(true) as Element;
-  for (const sel of ['script', 'style', 'noscript', 'iframe', 'ins', ...(site.remove ?? [])]) {
-    root.querySelectorAll(sel).forEach((n) => n.remove());
-  }
   const doc = root.ownerDocument;
+  for (const sel of ['script', 'style', 'noscript', 'iframe', 'ins', ...(site.remove ?? [])]) {
+    root.querySelectorAll(sel).forEach((n) => {
+      if (BLOCK_TAGS.has(n.tagName)) n.replaceWith(doc.createTextNode('\n'));
+      else n.remove();
+    });
+  }
   root.querySelectorAll('br').forEach((br) => br.replaceWith(doc.createTextNode('\n')));
-  root.querySelectorAll('*').forEach((el) => {
-    if (BLOCK_TAGS.has(el.tagName)) el.append(doc.createTextNode('\n'));
-  });
+  root.querySelectorAll(BLOCK_SELECTOR).forEach((el) => el.append(doc.createTextNode('\n')));
   const filters = compileFilters(site);
   const lines = (root.textContent ?? '')
     .split('\n')
+    .flatMap((raw) => raw.trim().split(/[\u2002\u2003\u3000]{2,}/))
     .map(cleanText)
     .filter((line) => {
       if (!line) return false;
@@ -201,6 +210,31 @@ export function extractParagraphs(content: Element, site: SiteEntry, title: stri
   const norm = (s: string) => s.replace(/\s+/g, '');
   if (lines.length && norm(lines[0]) === norm(title)) lines.shift();
   return lines;
+}
+
+const TERMINAL_PUNCT = /[。！？!?；;：:”"’'」』》）)\]】…—~～.]$/;
+const HEADING_OR_DIALOGUE_START = /^[“"‘'「『（(【[《第]|^(楔子|序[章言]?|引子|尾声|番外|ps[:：])/i;
+const HEADING_LINE = /^(第[\d零〇一二两三四五六七八九十百千万]+[章节回卷集部篇话話]|楔子|序[章言]?|引子|尾声|番外)(\s|$)/;
+
+/** 合并句中被站源硬换行/空行切断的段落（上段无终结标点且下段非对话/标题） */
+export function mergeBrokenParagraphs(lines: string[]): string[] {
+  if (lines.length < 2) return lines;
+  const out: string[] = [];
+  for (const line of lines) {
+    const prev = out[out.length - 1];
+    if (
+      prev &&
+      prev.length >= 6 &&
+      !TERMINAL_PUNCT.test(prev) &&
+      !HEADING_LINE.test(prev) &&
+      !HEADING_OR_DIALOGUE_START.test(line)
+    ) {
+      out[out.length - 1] = prev + line;
+    } else {
+      out.push(line);
+    }
+  }
+  return out;
 }
 
 const PAGE_LINK_TEXT = /下一?[页頁]/;
@@ -233,7 +267,7 @@ export function extractChapter(doc: Document, site: SiteEntry, url: string): Cha
   const toc = findLink(doc, site.tocLink, TOC_TEXT);
   const book = findLink(doc, site.bookLink, BOOK_TEXT);
   const chapterOrNone = (a?: HTMLAnchorElement) =>
-    a && a.href !== url && isChapterUrl(site, a.href, url) ? a.href : undefined;
+    a && a.href.split('#')[0] !== url.split('#')[0] && isChapterUrl(site, a.href, url) ? a.href : undefined;
   const nextUrl = chapterOrNone(next);
   return {
     url,
@@ -245,6 +279,15 @@ export function extractChapter(doc: Document, site: SiteEntry, url: string): Cha
     tocUrl: toc?.href,
     bookUrl: book?.href,
   };
+}
+
+/** 从标题中提取分页进度，例如「（1 / 7）」或「(第1/10页)」 */
+export function parsePageMark(title: string): { page: number; total: number } | undefined {
+  const m = title.match(/[（(]\s*(\d+)\s*\/\s*(\d+)\s*[)）]|[（(]?第\s*(\d+)\s*\/\s*(\d+)\s*[页頁][)）]?/);
+  if (!m) return undefined;
+  const page = Number(m[1] ?? m[3]);
+  const total = Number(m[2] ?? m[4]);
+  return page >= 1 && total >= page ? { page, total } : undefined;
 }
 
 /** 去掉分页标记后比较，用于把"同一章的第 2 页"合并到上一页 */

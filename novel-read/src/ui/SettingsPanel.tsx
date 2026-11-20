@@ -76,7 +76,7 @@ export function SettingsPanel({
   const [tab, setTab] = useState<'read' | 'filters' | 'sites' | 'data'>('read');
 
   return (
-    <section class="nr-panel">
+    <section class="nr-panel" role="dialog" aria-label="设置">
       <div class="nr-panel-head">
         <h2>设置</h2>
         <div style="display:flex;align-items:center;gap:8px">
@@ -135,6 +135,13 @@ export function SettingsPanel({
                   </button>
                 ))}
               </div>
+              <input
+                class="nr-input"
+                style="margin-top:8px"
+                placeholder="可选：输入本机字体名，如 霞鹜文楷"
+                value={s.customFont}
+                onInput={(e) => update({ customFont: e.currentTarget.value })}
+              />
             </Row>
             <Row label="字体大小">
               <div class="nr-stepper">
@@ -193,6 +200,29 @@ export function SettingsPanel({
                 onChange={(script) => update({ script })}
                 label={(id) => SCRIPT_MODES.find((m) => m.id === id)!.name}
               />
+            </Row>
+            <Row label="排版辅助">
+              <div class="nr-options is-compact">
+                <button class={`nr-btn${s.indent !== false ? ' is-active' : ''}`} onClick={() => update({ indent: s.indent === false })}>
+                  段首缩进
+                </button>
+                <button class={`nr-btn${s.justify !== false ? ' is-active' : ''}`} onClick={() => update({ justify: s.justify === false })}>
+                  两端对齐
+                </button>
+                <button
+                  class={`nr-btn${s.mergeParagraphs !== false ? ' is-active' : ''}`}
+                  onClick={() => update({ mergeParagraphs: s.mergeParagraphs === false })}
+                  title="自动拼接句中被空行切断的段落"
+                >
+                  断段合并
+                </button>
+                <button
+                  class={`nr-btn${s.statusBar !== false ? ' is-active' : ''}`}
+                  onClick={() => update({ statusBar: s.statusBar === false })}
+                >
+                  信息底栏
+                </button>
+              </div>
             </Row>
           </>
         )}

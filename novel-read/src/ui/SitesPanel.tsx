@@ -63,12 +63,14 @@ function SiteCard({
             <span class="nr-site-name">{site.name}</span>
             {isCurrent && <span class="nr-chip is-accent">当前</span>}
             {site.builtin && <span class="nr-chip">内置</span>}
-            <span class="nr-chip">{site.content ? '已适配' : '自动识别'}</span>
+            <span class="nr-chip">{site.content || site.adapter ? '已适配' : '自动识别'}</span>
           </div>
           <div class="nr-site-hosts">{site.hosts.join('、')}</div>
         </div>
         <button
           class={`nr-switch${site.enabled ? ' is-on' : ''}`}
+          role="switch"
+          aria-checked={site.enabled}
           title={site.enabled ? '已启用' : '已禁用'}
           onClick={() => onChange(upsertSite({ ...site, enabled: !site.enabled }))}
         />
